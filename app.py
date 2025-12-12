@@ -7,7 +7,7 @@ import time # 用來產生唯一 ID
 st.set_page_config(page_title="台股交易日誌 V2", page_icon="📈", layout="wide")
 
 # --- 檔案設定 ---
-FILE_NAME = "trades.csv"
+FILE_NAME = "trades_v2.csv"
 
 # --- 核心函式 ---
 def load_data():
