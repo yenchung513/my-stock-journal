@@ -7,80 +7,65 @@ from google.oauth2.service_account import Credentials
 import json
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="台股雲端日誌 V3.0", page_icon="☁️", layout="wide")
+st.set_page_config(page_title="台股雲端日誌 V3.1", page_icon="☁️", layout="wide")
 
-# --- Google Sheets 設定 ---
-# 請確保你的 Google 試算表名稱跟下面這個一樣
-SHEET_NAME = "stock_db"
+# --- Google Sheets 設定 (改用 ID) ---
+# ⚠️ 請把下面這串換成你剛剛複製的 ID
+SHEET_ID = "1-NbOD6TcHiRVDzWB5MXq6JVo7B73o31mPPPmltph_CA"
 
-# --- 連線函式 (Connect to Google) ---
+# --- 連線函式 ---
 def get_google_sheet():
-    # 讀取 Secrets
     if "gcp_service_account" not in st.secrets:
-        st.error("找不到 Secrets 設定！請檢查 Streamlit 後台。")
+        st.error("找不到 Secrets 設定！")
         st.stop()
 
-    # 判斷使用者是用哪種方式貼上 Secrets 的
     secrets = st.secrets["gcp_service_account"]
     
-    # 如果是用 "json_content" 的偷吃步方法
     if "json_content" in secrets:
         creds_dict = json.loads(secrets["json_content"])
     else:
-        # 如果是標準 TOML 格式
         creds_dict = secrets
 
-    # 設定權限範圍
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     client = gspread.authorize(creds)
     
     try:
-        sheet = client.open(SHEET_NAME).sheet1
+        # ⚠️ 關鍵修改：改用 open_by_key (直接抓ID，不搜尋檔名)
+        sheet = client.open_by_key(SHEET_ID).sheet1
         return sheet
-    except gspread.exceptions.SpreadsheetNotFound:
-        st.error(f"找不到名稱為 '{SHEET_NAME}' 的試算表！請確認 Google Drive 裡的檔名，並確認有共用給機器人。")
+    except Exception as e:
+        st.error(f"連線失敗！請檢查 ID 是否正確，或是否忘記共用給機器人。\n錯誤訊息: {e}")
         st.stop()
 
 # --- 資料讀寫函式 ---
 def load_data():
     sheet = get_google_sheet()
     try:
-        # 抓取所有資料
         data = sheet.get_all_records()
         df = pd.DataFrame(data)
         
-        # 處理空資料的情況
         if df.empty:
             return pd.DataFrame(columns=["ID", "日期", "策略", "代號", "買入價", "股數", "狀態", "賣出價", "損益", "手續費折數"])
             
-        # 強制轉型 ID 為字串 (避免科學記號)
         if "ID" in df.columns:
             df["ID"] = df["ID"].astype(str)
-        else:
-             # 如果是全新的表，可能沒有 ID，補上空欄位
-             pass
              
         return df
     except Exception as e:
-        st.error(f"讀取資料失敗: {e}")
-        return pd.DataFrame()
+        # 如果是全新的表，get_all_records 可能會因為標題列也沒有而報錯，這裡做個防護
+        return pd.DataFrame(columns=["ID", "日期", "策略", "代號", "買入價", "股數", "狀態", "賣出價", "損益", "手續費折數"])
 
 def save_data(df):
     sheet = get_google_sheet()
-    # 因為 gspread 更新整張表比較快且安全，我們先清空再寫入
-    # 為了避免格式跑掉，我們把所有資料轉成字串或標準格式
     sheet.clear()
-    
-    # 準備寫入的資料 (包含標題)
-    # 處理 NaN 空值，轉成空字串
     df_to_save = df.fillna("")
+    # 將 DataFrame 轉換為 list of lists，並包含標題
     data = [df_to_save.columns.values.tolist()] + df_to_save.values.tolist()
-    
     sheet.update(data)
 
 # --- 側邊欄：新增交易 ---
-st.sidebar.header("📝 新增交易 (雲端版)")
+st.sidebar.header("📝 新增交易 (雲端 ID 版)")
 
 trade_date = st.sidebar.date_input("交易日期", datetime.now())
 strategy = st.sidebar.selectbox("策略", ["突破追價", "拉回低接", "長期存股", "隔日沖", "抄底失敗"])
@@ -90,7 +75,7 @@ volume = st.sidebar.number_input("買入股數", min_value=1, value=1000, step=1
 discount = st.sidebar.number_input("手續費折數 (折)", value=2.8, step=0.1)
 
 if st.sidebar.button("➕ 建倉 (寫入雲端)"):
-    with st.spinner("正在寫入 Google Sheet..."): # 轉圈圈特效
+    with st.spinner("正在寫入 Google Sheet..."):
         df = load_data()
         new_id = str(int(time.time() * 1000))
         
@@ -115,10 +100,8 @@ if st.sidebar.button("➕ 建倉 (寫入雲端)"):
     st.rerun()
 
 # --- 主畫面 ---
-st.title("☁️ 台股雲端日誌 V3.0 (Google Sheet)")
+st.title("☁️ 台股雲端日誌 V3.1 (ID直連版)")
 
-# 讀取資料
-# 這裡加個快取，避免每次按按鈕都重讀，但為了即時性，我們暫時不加 @st.cache_data
 df = load_data()
 
 tab1, tab2, tab3 = st.tabs(["💼 持倉管理", "📜 歷史戰績", "🗑️ 資料管理"])
@@ -138,7 +121,8 @@ with tab1:
             
             if selected_label:
                 selected_id = options[selected_label]
-                target_row = df[df["ID"] == selected_id].iloc[0]
+                # ID 比對修正
+                target_row = df[df["ID"].astype(str) == str(selected_id)].iloc[0]
                 
                 col1, col2, col3 = st.columns(3)
                 with col1:
@@ -161,14 +145,11 @@ with tab1:
                         tax = int(sell_revenue * 0.003)
                         profit = sell_revenue - sell_fee - tax - (buy_cost + buy_fee)
                         
-                        # 重新讀取最新的 df 以確保不覆蓋別人改的
                         df = load_data()
-                        # 找到對應的 index
-                        # 注意：ID 必須轉成字串比對
                         idx_list = df.index[df['ID'].astype(str) == str(selected_id)].tolist()
                         
                         if not idx_list:
-                            st.error("找不到該筆資料，可能已被刪除")
+                            st.error("找不到該筆資料")
                         else:
                             original_idx = idx_list[0]
                             
@@ -198,14 +179,13 @@ with tab1:
         else:
             st.info("目前沒有庫存。")
     else:
-        st.info("讀取資料中或是新資料庫...")
+        st.info("連結成功！請新增第一筆交易。")
 
 # === Tab 2: 歷史戰績 ===
 with tab2:
     st.subheader("已實現損益")
     if not df.empty and "狀態" in df.columns:
         closed_positions = df[df["狀態"] == "已平倉"].copy()
-        
         if not closed_positions.empty:
             def highlight_profit(val):
                 try:
@@ -213,7 +193,6 @@ with tab2:
                     return f'color: {color}; font-weight: bold;'
                 except:
                     return ''
-
             display_cols = ["日期", "策略", "代號", "買入價", "賣出價", "股數", "損益"]
             st.dataframe(closed_positions[display_cols].style.applymap(highlight_profit, subset=['損益']), use_container_width=True)
         else:
@@ -222,10 +201,9 @@ with tab2:
 # === Tab 3: 資料管理 ===
 with tab3:
     st.subheader("🗑️ 刪除或修正資料")
-    if not df.empty:
+    if not df.empty and "ID" in df.columns:
         st.dataframe(df)
         delete_options = {f"[{row['狀態']}] {row['日期']} - {row['代號']}": row['ID'] for index, row in df.iterrows()}
-        
         if delete_options:
             delete_id = st.selectbox("選擇要刪除的紀錄", list(delete_options.keys()))
             if st.button("❌ 確認刪除"):
