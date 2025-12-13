@@ -5,13 +5,13 @@ import time
 import gspread
 from google.oauth2.service_account import Credentials
 import json
-import plotly.express as px # 👈 引入圖表大神
+import plotly.express as px
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="台股雲端戰情室 V4.0", page_icon="📈", layout="wide")
+st.set_page_config(page_title="台股雲端戰情室 V4.1", page_icon="📈", layout="wide")
 
 # --- Google Sheets 設定 ---
-# ⚠️ 請確保這裡填的是正確的 ID
+# ⚠️ 請確保這裡填的是正確的 ID (不用改，沿用你原本的)
 SHEET_ID = "1-NbOD6TcHiRVDzWB5MXq6JVo7B73o31mPPPmltph_CA"
 
 # --- 連線函式 ---
@@ -65,7 +65,7 @@ def save_data(df):
 # --- 側邊欄：新增交易 ---
 st.sidebar.header("📝 新增交易")
 
-trade_date = st.sidebar.date_input("交易日期", datetime.now())
+trade_date = st.sidebar.date_input("交易日期 (買進日)", datetime.now())
 strategy = st.sidebar.selectbox("策略", ["突破追價", "拉回低接", "長期存股", "隔日沖", "抄底失敗"])
 stock_id = st.sidebar.text_input("股票代號/名稱", "2330 台積電")
 buy_price = st.sidebar.number_input("買入價格", min_value=0.0, step=0.1, format="%.2f")
@@ -98,11 +98,10 @@ if st.sidebar.button("➕ 建倉"):
     st.rerun()
 
 # --- 主畫面 ---
-st.title("📊 台股雲端戰情室 V4.0")
+st.title("📊 台股雲端戰情室 V4.1")
 
 df = load_data()
 
-# 變成四個分頁
 tab1, tab2, tab3, tab4 = st.tabs(["💼 持倉管理", "📜 歷史戰績", "📊 圖表分析", "🗑️ 資料管理"])
 
 # === Tab 1: 持倉管理 ===
@@ -126,13 +125,17 @@ with tab1:
                 selected_id = options[selected_label]
                 target_row = df[df["ID"].astype(str) == str(selected_id)].iloc[0]
                 
-                col1, col2, col3 = st.columns(3)
+                # 👇 這裡改成 4 個欄位，加入日期選擇
+                col1, col2, col3, col4 = st.columns(4)
                 with col1:
-                    sell_price = st.number_input("賣出價格", min_value=0.0, step=0.1, format="%.2f")
+                    # 預設為今天
+                    sell_date_input = st.date_input("賣出日期", datetime.now())
                 with col2:
+                    sell_price = st.number_input("賣出價格", min_value=0.0, step=0.1, format="%.2f")
+                with col3:
                     current_qty = int(target_row["股數"])
                     sell_qty = st.number_input("賣出股數", min_value=1, max_value=current_qty, value=current_qty)
-                with col3:
+                with col4:
                     st.markdown("<br>", unsafe_allow_html=True)
                     confirm_sell = st.button("⚡ 執行賣出")
 
@@ -151,23 +154,34 @@ with tab1:
                         
                         if idx_list:
                             original_idx = idx_list[0]
+                            # 轉成字串格式的日期
+                            sell_date_str = sell_date_input.strftime("%Y-%m-%d")
+
                             if sell_qty == current_qty:
+                                # 全賣：更新狀態、價格、損益、還有「日期」
                                 df.at[original_idx, "狀態"] = "已平倉"
                                 df.at[original_idx, "賣出價"] = sell_price
                                 df.at[original_idx, "損益"] = profit
+                                df.at[original_idx, "日期"] = sell_date_str # 👈 更新為賣出日
                             else:
+                                # 分批賣：剩下的保留，賣出的部分分裂出去
                                 remain_qty = current_qty - sell_qty
                                 df.at[original_idx, "股數"] = remain_qty
+                                # 原本的庫存保持原本的「買入日期」，不動它
+                                
+                                # 新增一筆「已平倉」的紀錄
                                 new_closed_record = target_row.copy()
                                 new_closed_record["ID"] = str(int(time.time() * 1000))
                                 new_closed_record["股數"] = sell_qty
                                 new_closed_record["賣出價"] = sell_price
                                 new_closed_record["狀態"] = "已平倉"
                                 new_closed_record["損益"] = profit
+                                new_closed_record["日期"] = sell_date_str # 👈 新紀錄用賣出日
+                                
                                 df = pd.concat([pd.DataFrame([new_closed_record]), df], ignore_index=True)
 
                             save_data(df)
-                            st.success(f"平倉完成！損益: {profit}")
+                            st.success(f"平倉完成！損益: {profit} (日期: {sell_date_str})")
                             time.sleep(1)
                             st.rerun()
         else:
@@ -179,7 +193,6 @@ with tab2:
     if not df.empty and "狀態" in df.columns:
         closed_positions = df[df["狀態"] == "已平倉"].copy()
         if not closed_positions.empty:
-            # 轉換損益為數字以便排序和上色
             closed_positions["損益"] = pd.to_numeric(closed_positions["損益"])
             
             def highlight_profit(val):
@@ -190,53 +203,38 @@ with tab2:
         else:
             st.info("尚未有平倉紀錄")
 
-# === Tab 3: 圖表分析 (本次新增核心) ===
+# === Tab 3: 圖表分析 ===
 with tab3:
     st.subheader("📈 交易數據分析")
     
     if not df.empty and "狀態" in df.columns:
-        # 只分析已平倉的資料
         closed_df = df[df["狀態"] == "已平倉"].copy()
         
         if not closed_df.empty:
-            # 資料前處理
             closed_df["損益"] = pd.to_numeric(closed_df["損益"])
             closed_df["日期"] = pd.to_datetime(closed_df["日期"])
-            closed_df = closed_df.sort_values("日期") # 依照日期排序，才能畫資金曲線
+            closed_df = closed_df.sort_values("日期")
             
-            # 1. 資金曲線圖 (Cumulative Profit)
             closed_df["累積損益"] = closed_df["損益"].cumsum()
             
-            st.markdown("##### 💰 資金累計曲線")
-            fig_line = px.line(closed_df, x="日期", y="累積損益", markers=True, 
-                               title="帳戶淨值成長走勢 (累積損益)")
-            # 設定漲跌顏色 (Plotly 預設不同，這裡簡單處理)
+            st.markdown("##### 💰 資金累計曲線 (依實現日期)")
+            fig_line = px.line(closed_df, x="日期", y="累積損益", markers=True, title="帳戶淨值成長走勢")
             fig_line.update_traces(line_color='#2980b9', line_width=3)
             st.plotly_chart(fig_line, use_container_width=True)
             
             col1, col2 = st.columns(2)
-            
             with col1:
-                # 2. 策略績效分析 (Bar Chart)
                 st.markdown("##### 📊 各策略總損益")
-                # 依照策略分組加總
                 strategy_perf = closed_df.groupby("策略")["損益"].sum().reset_index()
-                fig_bar = px.bar(strategy_perf, x="策略", y="損益", 
-                                 color="損益", 
-                                 color_continuous_scale=["#00c853", "#ff4b4b"], # 綠賠紅賺
-                                 title="策略賺賠排行")
+                fig_bar = px.bar(strategy_perf, x="策略", y="損益", color="損益", 
+                                 color_continuous_scale=["#00c853", "#ff4b4b"])
                 st.plotly_chart(fig_bar, use_container_width=True)
-                
             with col2:
-                # 3. 勝率分析 (Pie Chart)
-                st.markdown("##### 🍰 勝敗場次比例")
-                closed_df["結果"] = closed_df["損益"].apply(lambda x: "獲利 (Win)" if x > 0 else "虧損 (Loss)")
-                fig_pie = px.pie(closed_df, names="結果", 
-                                 color="結果",
-                                 color_discrete_map={"獲利 (Win)": "#ff4b4b", "虧損 (Loss)": "#00c853"},
-                                 title="勝率分布")
+                st.markdown("##### 🍰 勝率")
+                closed_df["結果"] = closed_df["損益"].apply(lambda x: "獲利" if x > 0 else "虧損")
+                fig_pie = px.pie(closed_df, names="結果", color="結果",
+                                 color_discrete_map={"獲利": "#ff4b4b", "虧損": "#00c853"})
                 st.plotly_chart(fig_pie, use_container_width=True)
-
         else:
             st.info("累積足夠的平倉紀錄後，圖表會自動出現！")
     else:
