@@ -8,7 +8,7 @@ import json
 import plotly.express as px
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="台股雲端戰情室 V5.0", page_icon="📈", layout="wide")
+st.set_page_config(page_title="台股雲端戰情室 V5.1", page_icon="📈", layout="wide")
 
 # --- Google Sheets 設定 ---
 SHEET_ID = "1-NbOD6TcHiRVDzWB5MXq6JVo7B73o31mPPPmltph_CA"
@@ -37,23 +37,30 @@ def get_google_sheet():
         st.error(f"連線失敗！錯誤訊息: {e}")
         st.stop()
 
-# --- 資料讀寫函式 (含自動欄位修復) ---
+# --- 資料讀寫函式 (V5.1 強力修復版) ---
 def load_data():
     sheet = get_google_sheet()
     try:
         data = sheet.get_all_records()
         df = pd.DataFrame(data)
         
+        # 1. 初始化空表
         if df.empty:
             return pd.DataFrame(columns=["ID", "日期", "買入日期", "策略", "代號", "買入價", "股數", "狀態", "賣出價", "損益", "手續費折數"])
             
+        # 2. 處理 ID
         if "ID" in df.columns:
             df["ID"] = df["ID"].astype(str)
         
-        # === V5.0 自動修復舊資料 ===
-        # 如果舊資料沒有「買入日期」，我們暫時把「日期」複製過去
+        # 3. 處理「買入日期」欄位 (修復核心)
         if "買入日期" not in df.columns:
+            # 如果欄位完全不存在，直接複製「日期」欄位
             df["買入日期"] = df["日期"]
+        else:
+            # 如果欄位存在，但有些格子是空的 (舊資料)，把空的補上
+            # 將空白字串或 NaN 的格子，填入對應的「日期」值
+            df["買入日期"] = df["買入日期"].replace(r'^\s*$', pd.NA, regex=True) # 把空白轉成 NA
+            df["買入日期"] = df["買入日期"].fillna(df["日期"])
             
         return df
     except Exception as e:
@@ -84,8 +91,8 @@ if st.sidebar.button("➕ 建倉"):
         
         new_data = {
             "ID": new_id,
-            "日期": date_str,      # 這個欄位會隨賣出更新，用於畫圖
-            "買入日期": date_str,  # 👈 新增：這個欄位永遠固定，紀錄買進日
+            "日期": date_str,      # 主日期 (會隨賣出更新)
+            "買入日期": date_str,  # 備份日期 (永遠不變)
             "策略": strategy,
             "代號": stock_id,
             "買入價": buy_price,
@@ -104,7 +111,7 @@ if st.sidebar.button("➕ 建倉"):
     st.rerun()
 
 # --- 主畫面 ---
-st.title("📊 台股雲端戰情室 V5.0")
+st.title("📊 台股雲端戰情室 V5.1")
 
 df = load_data()
 
@@ -120,7 +127,7 @@ with tab1:
             market_value = (open_positions["買入價"].astype(float) * open_positions["股數"].astype(int)).sum()
             st.metric("庫存總成本 (約)", f"${market_value:,.0f}")
 
-            # 顯示表格 (使用買入日期)
+            # 顯示表格
             display_df = open_positions[["買入日期", "策略", "代號", "買入價", "股數", "手續費折數"]].copy()
             st.dataframe(display_df, use_container_width=True)
             st.markdown("---")
@@ -154,25 +161,29 @@ with tab1:
                         tax = int(sell_revenue * 0.003)
                         profit = sell_revenue - sell_fee - tax - (buy_cost + buy_fee)
                         
-                        df = load_data()
+                        df = load_data() # 重新讀取，確保有最新的「買入日期」欄位
                         idx_list = df.index[df['ID'].astype(str) == str(selected_id)].tolist()
                         
                         if idx_list:
                             original_idx = idx_list[0]
                             sell_date_str = sell_date_input.strftime("%Y-%m-%d")
 
-                            # 處理買入日期 (防止舊資料沒有這個欄位)
-                            original_buy_date = target_row.get("買入日期", target_row["日期"])
+                            # ⚠️ 關鍵修正：確保抓到原本的買入日期
+                            # 如果欄位是空的，就只好抓當下的「日期」(這通常發生在持倉中，所以也是對的)
+                            original_buy_date = target_row.get("買入日期")
+                            if pd.isna(original_buy_date) or str(original_buy_date).strip() == "":
+                                original_buy_date = target_row["日期"]
 
                             if sell_qty == current_qty:
                                 df.at[original_idx, "狀態"] = "已平倉"
                                 df.at[original_idx, "賣出價"] = sell_price
                                 df.at[original_idx, "損益"] = profit
-                                df.at[original_idx, "日期"] = sell_date_str # 更新主日期為賣出日(畫圖用)
-                                df.at[original_idx, "買入日期"] = original_buy_date # 確保買入日不變
+                                df.at[original_idx, "日期"] = sell_date_str # 更新主日期 -> 賣出日 (給圖表用)
+                                df.at[original_idx, "買入日期"] = original_buy_date # 確保買入日不動
                             else:
                                 remain_qty = current_qty - sell_qty
                                 df.at[original_idx, "股數"] = remain_qty
+                                # 分批賣出，原本的庫存不需要動日期
                                 
                                 new_closed_record = target_row.copy()
                                 new_closed_record["ID"] = str(int(time.time() * 1000))
@@ -180,13 +191,13 @@ with tab1:
                                 new_closed_record["賣出價"] = sell_price
                                 new_closed_record["狀態"] = "已平倉"
                                 new_closed_record["損益"] = profit
-                                new_closed_record["日期"] = sell_date_str # 主日期 = 賣出日
-                                new_closed_record["買入日期"] = original_buy_date # 買入日 = 原始買入日
+                                new_closed_record["日期"] = sell_date_str # 主日期 -> 賣出日
+                                new_closed_record["買入日期"] = original_buy_date # 買入日 -> 原始買入日
                                 
                                 df = pd.concat([pd.DataFrame([new_closed_record]), df], ignore_index=True)
 
                             save_data(df)
-                            st.success(f"平倉完成！損益: {profit}")
+                            st.success(f"平倉完成！")
                             time.sleep(1)
                             st.rerun()
         else:
@@ -206,9 +217,12 @@ with tab2:
                 color = '#ff4b4b' if val > 0 else '#00c853'
                 return f'color: {color}; font-weight: bold;'
 
-            # 這裡把欄位重新整理，顯示買入跟賣出日期 (注意：這裡的「日期」其實是賣出日)
-            # 我們為了顯示清楚，把 DataFrame 的欄位改名顯示，但不影響原始資料
+            # 顯示修正：明確列出「買入日期」與「賣出日期」
+            # 注意：在資料庫中，「日期」欄位被更新為賣出日，「買入日期」才是買入日
+            # 為了讓使用者不困惑，我們在顯示時把欄位名稱對調顯示
             display_cols = ["買入日期", "日期", "策略", "代號", "買入價", "賣出價", "股數", "損益"]
+            
+            # 建立一個顯示用的 DataFrame，把「日期」改名為「賣出日期」
             show_df = closed_positions[display_cols].rename(columns={"日期": "賣出日期"})
             
             st.dataframe(show_df.style.applymap(highlight_profit, subset=['損益']), use_container_width=True)
