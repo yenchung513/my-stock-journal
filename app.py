@@ -8,7 +8,7 @@ import json
 import plotly.express as px
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="台股雲端戰情室 V6.0", page_icon="📈", layout="wide")
+st.set_page_config(page_title="台股雲端戰情室 V6.1", page_icon="📈", layout="wide")
 
 # --- Google Sheets 設定 ---
 SHEET_ID = "1-NbOD6TcHiRVDzWB5MXq6JVo7B73o31mPPPmltph_CA"
@@ -50,7 +50,6 @@ def load_data():
         if "ID" in df.columns:
             df["ID"] = df["ID"].astype(str)
         
-        # 自動修復舊資料：若無買入日期，用日期填補
         if "買入日期" not in df.columns:
             df["買入日期"] = df["日期"]
         else:
@@ -72,7 +71,7 @@ def save_data(df):
 st.sidebar.header("📝 新增交易")
 
 trade_date = st.sidebar.date_input("交易日期 (買進日)", datetime.now())
-# 雖然圖表不顯示策略，但紀錄還是保留策略欄位供未來參考，這裡保留輸入框
+# 這裡改成單純的文字輸入，或者保留選單但標題註明
 strategy = st.sidebar.selectbox("策略 (紀錄用)", ["突破追價", "拉回低接", "長期存股", "隔日沖", "抄底失敗"])
 stock_id = st.sidebar.text_input("股票代號/名稱", "2330 台積電")
 buy_price = st.sidebar.number_input("買入價格", min_value=0.0, step=0.1, format="%.2f")
@@ -107,7 +106,7 @@ if st.sidebar.button("➕ 建倉"):
     st.rerun()
 
 # --- 主畫面 ---
-st.title("📊 台股雲端戰情室 V6.0")
+st.title("📊 台股雲端戰情室 V6.1")
 
 df = load_data()
 
@@ -215,7 +214,7 @@ with tab2:
         else:
             st.info("尚未有平倉紀錄")
 
-# === Tab 3: 圖表分析 (V6.0 重點更新) ===
+# === Tab 3: 圖表分析 ===
 with tab3:
     st.subheader("📈 交易數據分析")
     
@@ -225,50 +224,48 @@ with tab3:
         if not closed_df.empty:
             # 資料處理
             closed_df["損益"] = pd.to_numeric(closed_df["損益"])
-            closed_df["日期"] = pd.to_datetime(closed_df["日期"])     # 賣出日
-            closed_df["買入日期"] = pd.to_datetime(closed_df["買入日期"]) # 買入日
+            closed_df["日期"] = pd.to_datetime(closed_df["日期"])
+            closed_df["買入日期"] = pd.to_datetime(closed_df["買入日期"])
             closed_df = closed_df.sort_values("日期")
             
-            # 計算持倉天數
-            closed_df["持倉天數"] = (closed_df["日期"] - closed_df["買入日期"]).dt.days
-            # 至少算 1 天 (當沖)
-            closed_df["持倉天數"] = closed_df["持倉天數"].apply(lambda x: 1 if x < 1 else x)
-
-            # 計算月份 (YYYY-MM)
-            closed_df["月份"] = closed_df["日期"].dt.strftime('%Y-%m')
-
-            # 1. 資金曲線 (不變，因為這最重要)
+            # 1. 資金曲線
             closed_df["累積損益"] = closed_df["損益"].cumsum()
             st.markdown("##### 💰 帳戶淨值走勢")
             fig_line = px.line(closed_df, x="日期", y="累積損益", markers=True)
             fig_line.update_traces(line_color='#2980b9', line_width=3)
             st.plotly_chart(fig_line, use_container_width=True)
             
-            # 版面：左右兩欄
             col1, col2 = st.columns(2)
             
             with col1:
-                # 2. 每月損益 (取代策略分析)
-                st.markdown("##### 📅 每月損益 (Monthly P/L)")
-                monthly_perf = closed_df.groupby("月份")["損益"].sum().reset_index()
+                # 2. 每週損益 (Weekly P/L) - 更新重點
+                st.markdown("##### 📅 每週損益 (Weekly P/L)")
                 
-                # 設定顏色：賺錢紅，賠錢綠
-                fig_bar = px.bar(monthly_perf, x="月份", y="損益",
+                # 計算週次 (例如: 2023-W48)
+                # %Y 是年份，%U 是週數(週日開始)，使用 %V (ISO週數) 也可以
+                closed_df["週次"] = closed_df["日期"].dt.strftime('%Y-W%U')
+                
+                weekly_perf = closed_df.groupby("週次")["損益"].sum().reset_index()
+                
+                fig_bar = px.bar(weekly_perf, x="週次", y="損益",
                                  color="損益",
                                  color_continuous_scale=["#00c853", "#ff4b4b"],
                                  text_auto=True)
+                # 讓 X 軸字不要太擠
+                fig_bar.update_layout(xaxis=dict(type='category'))
                 st.plotly_chart(fig_bar, use_container_width=True)
                 
             with col2:
-                # 3. 持倉天數 vs 損益 (新功能)
+                # 3. 持倉天數
                 st.markdown("##### ⏳ 持倉天數 vs 損益")
-                # 這張圖可以看出：你是不是抱越久賠越多？
+                closed_df["持倉天數"] = (closed_df["日期"] - closed_df["買入日期"]).dt.days
+                closed_df["持倉天數"] = closed_df["持倉天數"].apply(lambda x: 1 if x < 1 else x)
+                
                 fig_scatter = px.scatter(closed_df, x="持倉天數", y="損益",
                                          color="損益",
-                                         size=closed_df["損益"].abs(), # 泡泡大小 = 賺賠金額絕對值
-                                         hover_data=["代號", "買入日期"], # 滑鼠移上去顯示股票
+                                         size=closed_df["損益"].abs(),
+                                         hover_data=["代號", "買入日期"],
                                          color_continuous_scale=["#00c853", "#ff4b4b"])
-                # 加一條 0 軸線方便看
                 fig_scatter.add_hline(y=0, line_dash="dash", line_color="gray")
                 st.plotly_chart(fig_scatter, use_container_width=True)
 
