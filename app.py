@@ -8,7 +8,7 @@ import json
 import plotly.express as px
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="台股雲端戰情室 V6.1", page_icon="📈", layout="wide")
+st.set_page_config(page_title="台股雲端戰情室 V6.2", page_icon="📈", layout="wide")
 
 # --- Google Sheets 設定 ---
 SHEET_ID = "1-NbOD6TcHiRVDzWB5MXq6JVo7B73o31mPPPmltph_CA"
@@ -44,21 +44,31 @@ def load_data():
         data = sheet.get_all_records()
         df = pd.DataFrame(data)
         
+        # 定義標準欄位
+        columns = ["ID", "日期", "買入日期", "策略", "代號", "買入價", "股數", "狀態", "賣出價", "損益", "手續費折數", "心得"]
+        
         if df.empty:
-            return pd.DataFrame(columns=["ID", "日期", "買入日期", "策略", "代號", "買入價", "股數", "狀態", "賣出價", "損益", "手續費折數"])
+            return pd.DataFrame(columns=columns)
             
+        # 確保所有欄位都存在 (包含新加的 '心得')
+        for col in columns:
+            if col not in df.columns:
+                df[col] = ""
+
         if "ID" in df.columns:
             df["ID"] = df["ID"].astype(str)
         
-        if "買入日期" not in df.columns:
-            df["買入日期"] = df["日期"]
-        else:
+        # 資料清洗與填補
+        if "買入日期" in df.columns:
             df["買入日期"] = df["買入日期"].replace(r'^\s*$', pd.NA, regex=True)
             df["買入日期"] = df["買入日期"].fillna(df["日期"])
+        
+        df["心得"] = df["心得"].fillna("") # 確保心得欄位不是 NaN
             
         return df
     except Exception as e:
-        return pd.DataFrame(columns=["ID", "日期", "買入日期", "策略", "代號", "買入價", "股數", "狀態", "賣出價", "損益", "手續費折數"])
+        # 發生錯誤時回傳空表
+        return pd.DataFrame(columns=["ID", "日期", "買入日期", "策略", "代號", "買入價", "股數", "狀態", "賣出價", "損益", "手續費折數", "心得"])
 
 def save_data(df):
     sheet = get_google_sheet()
@@ -71,7 +81,6 @@ def save_data(df):
 st.sidebar.header("📝 新增交易")
 
 trade_date = st.sidebar.date_input("交易日期 (買進日)", datetime.now())
-# 這裡改成單純的文字輸入，或者保留選單但標題註明
 strategy = st.sidebar.selectbox("策略 (紀錄用)", ["突破追價", "拉回低接", "長期存股", "隔日沖", "抄底失敗"])
 stock_id = st.sidebar.text_input("股票代號/名稱", "2330 台積電")
 buy_price = st.sidebar.number_input("買入價格", min_value=0.0, step=0.1, format="%.2f")
@@ -95,7 +104,8 @@ if st.sidebar.button("➕ 建倉"):
             "狀態": "持倉中",
             "賣出價": 0.0,
             "損益": 0,
-            "手續費折數": discount
+            "手續費折數": discount,
+            "心得": ""
         }
         
         df = pd.concat([pd.DataFrame([new_data]), df], ignore_index=True)
@@ -106,7 +116,7 @@ if st.sidebar.button("➕ 建倉"):
     st.rerun()
 
 # --- 主畫面 ---
-st.title("📊 台股雲端戰情室 V6.1")
+st.title("📊 台股雲端戰情室 V6.2")
 
 df = load_data()
 
@@ -183,6 +193,7 @@ with tab1:
                                 new_closed_record["損益"] = profit
                                 new_closed_record["日期"] = sell_date_str
                                 new_closed_record["買入日期"] = original_buy_date
+                                new_closed_record["心得"] = "" # 新紀錄清空心得
                                 
                                 df = pd.concat([pd.DataFrame([new_closed_record]), df], ignore_index=True)
 
@@ -195,9 +206,9 @@ with tab1:
     else:
         st.info("資料載入中...")
 
-# === Tab 2: 歷史戰績 ===
+# === Tab 2: 歷史戰績 (新增心得功能) ===
 with tab2:
-    st.subheader("已實現損益明細")
+    st.subheader("📜 已實現損益明細")
     if not df.empty and "狀態" in df.columns:
         closed_positions = df[df["狀態"] == "已平倉"].copy()
         if not closed_positions.empty:
@@ -207,10 +218,44 @@ with tab2:
                 color = '#ff4b4b' if val > 0 else '#00c853'
                 return f'color: {color}; font-weight: bold;'
 
-            display_cols = ["買入日期", "日期", "策略", "代號", "買入價", "賣出價", "股數", "損益"]
+            # 顯示表格包含心得
+            display_cols = ["買入日期", "日期", "代號", "買入價", "賣出價", "損益", "心得"]
             show_df = closed_positions[display_cols].rename(columns={"日期": "賣出日期"})
             
             st.dataframe(show_df.style.applymap(highlight_profit, subset=['損益']), use_container_width=True)
+            
+            # --- 編輯心得區域 ---
+            st.markdown("---")
+            st.subheader("✍️ 撰寫/修改交易心得")
+            
+            # 建立下拉選單，包含損益資訊讓使用者好找
+            note_options = {
+                f"{row['日期']} | {row['代號']} | ${row['損益']}": row['ID'] 
+                for index, row in closed_positions.iterrows()
+            }
+            
+            selected_note_key = st.selectbox("選擇一筆交易來寫筆記", list(note_options.keys()))
+            
+            if selected_note_key:
+                note_id = note_options[selected_note_key]
+                # 找到原始資料的那一行
+                current_row = df[df["ID"].astype(str) == str(note_id)].iloc[0]
+                current_note = current_row["心得"] if "心得" in current_row else ""
+                
+                # 文字輸入框，預設值帶入目前的心得
+                new_note = st.text_area("輸入你的檢討或筆記 (例如：太早賣出、凹單、遵守紀律...)", value=str(current_note), height=100)
+                
+                if st.button("💾 儲存心得"):
+                    with st.spinner("儲存中..."):
+                        # 更新 DataFrame
+                        idx_list = df.index[df['ID'].astype(str) == str(note_id)].tolist()
+                        if idx_list:
+                            df.at[idx_list[0], "心得"] = new_note
+                            save_data(df)
+                            st.success("心得已更新！")
+                            time.sleep(1)
+                            st.rerun()
+            
         else:
             st.info("尚未有平倉紀錄")
 
@@ -222,7 +267,6 @@ with tab3:
         closed_df = df[df["狀態"] == "已平倉"].copy()
         
         if not closed_df.empty:
-            # 資料處理
             closed_df["損益"] = pd.to_numeric(closed_df["損益"])
             closed_df["日期"] = pd.to_datetime(closed_df["日期"])
             closed_df["買入日期"] = pd.to_datetime(closed_df["買入日期"])
@@ -238,20 +282,15 @@ with tab3:
             col1, col2 = st.columns(2)
             
             with col1:
-                # 2. 每週損益 (Weekly P/L) - 更新重點
+                # 2. 每週損益
                 st.markdown("##### 📅 每週損益 (Weekly P/L)")
-                
-                # 計算週次 (例如: 2023-W48)
-                # %Y 是年份，%U 是週數(週日開始)，使用 %V (ISO週數) 也可以
                 closed_df["週次"] = closed_df["日期"].dt.strftime('%Y-W%U')
-                
                 weekly_perf = closed_df.groupby("週次")["損益"].sum().reset_index()
                 
                 fig_bar = px.bar(weekly_perf, x="週次", y="損益",
                                  color="損益",
                                  color_continuous_scale=["#00c853", "#ff4b4b"],
                                  text_auto=True)
-                # 讓 X 軸字不要太擠
                 fig_bar.update_layout(xaxis=dict(type='category'))
                 st.plotly_chart(fig_bar, use_container_width=True)
                 
@@ -264,7 +303,7 @@ with tab3:
                 fig_scatter = px.scatter(closed_df, x="持倉天數", y="損益",
                                          color="損益",
                                          size=closed_df["損益"].abs(),
-                                         hover_data=["代號", "買入日期"],
+                                         hover_data=["代號", "買入日期", "心得"], # 這裡也把心得加進去，滑鼠移過去看得到
                                          color_continuous_scale=["#00c853", "#ff4b4b"])
                 fig_scatter.add_hline(y=0, line_dash="dash", line_color="gray")
                 st.plotly_chart(fig_scatter, use_container_width=True)
