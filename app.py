@@ -6,11 +6,13 @@ import gspread
 from google.oauth2.service_account import Credentials
 import json
 import plotly.express as px
+import twstock # V6.3 新增：引入台股資訊套件
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="台股雲端戰情室 V6.2", page_icon="📈", layout="wide")
+st.set_page_config(page_title="台股雲端戰情室 V6.5", page_icon="📈", layout="wide")
 
 # --- Google Sheets 設定 ---
+# 請確認您的 SHEET_ID 是否正確
 SHEET_ID = "1-NbOD6TcHiRVDzWB5MXq6JVo7B73o31mPPPmltph_CA"
 
 # --- 連線函式 ---
@@ -44,13 +46,13 @@ def load_data():
         data = sheet.get_all_records()
         df = pd.DataFrame(data)
         
-        # 定義標準欄位
-        columns = ["ID", "日期", "買入日期", "策略", "代號", "買入價", "股數", "狀態", "賣出價", "損益", "手續費折數", "心得"]
+        # V6.4 新增：加入 '止損價' 欄位
+        columns = ["ID", "日期", "買入日期", "策略", "代號", "買入價", "止損價", "股數", "狀態", "賣出價", "損益", "手續費折數", "心得"]
         
         if df.empty:
             return pd.DataFrame(columns=columns)
             
-        # 確保所有欄位都存在 (包含新加的 '心得')
+        # 確保所有欄位都存在
         for col in columns:
             if col not in df.columns:
                 df[col] = ""
@@ -63,27 +65,64 @@ def load_data():
             df["買入日期"] = df["買入日期"].replace(r'^\s*$', pd.NA, regex=True)
             df["買入日期"] = df["買入日期"].fillna(df["日期"])
         
-        df["心得"] = df["心得"].fillna("") # 確保心得欄位不是 NaN
+        # 確保數值欄位正確轉換，避免計算錯誤
+        df["買入價"] = pd.to_numeric(df["買入價"], errors='coerce').fillna(0.0)
+        df["止損價"] = pd.to_numeric(df["止損價"], errors='coerce').fillna(0.0)
+        df["股數"] = pd.to_numeric(df["股數"], errors='coerce').fillna(0)
+        
+        df["心得"] = df["心得"].fillna("")
             
         return df
     except Exception as e:
-        # 發生錯誤時回傳空表
-        return pd.DataFrame(columns=["ID", "日期", "買入日期", "策略", "代號", "買入價", "股數", "狀態", "賣出價", "損益", "手續費折數", "心得"])
+        st.error(f"讀取資料發生錯誤: {e}")
+        return pd.DataFrame(columns=["ID", "日期", "買入日期", "策略", "代號", "買入價", "止損價", "股數", "狀態", "賣出價", "損益", "手續費折數", "心得"])
 
 def save_data(df):
     sheet = get_google_sheet()
     sheet.clear()
     df_to_save = df.fillna("")
+    # 轉換日期格式為字串，避免 JSON 序列化錯誤
+    if "日期" in df_to_save.columns:
+        df_to_save["日期"] = df_to_save["日期"].astype(str)
+    if "買入日期" in df_to_save.columns:
+        df_to_save["買入日期"] = df_to_save["買入日期"].astype(str)
+        
     data = [df_to_save.columns.values.tolist()] + df_to_save.values.tolist()
     sheet.update(data)
+
+# --- 輔助函式：取得即時股價 (V6.3) ---
+def get_realtime_prices(stock_codes):
+    if not stock_codes:
+        return {}
+    try:
+        # twstock 支援批次抓取
+        stocks = twstock.realtime.get(stock_codes) 
+        prices = {}
+        for code, data in stocks.items():
+            if data['success']:
+                # 嘗試取得最新成交價，如果沒有則取開盤價或其他
+                price = data['realtime'].get('latest_trade_price', None)
+                if price and price != "-":
+                    prices[code] = float(price)
+                else:
+                    # 盤中若無成交價（極少見），或是盤後，嘗試拿開盤價
+                    prices[code] = float(data['realtime'].get('open', 0))
+        return prices
+    except Exception as e:
+        st.warning(f"即時報價抓取失敗: {e}")
+        return {}
 
 # --- 側邊欄：新增交易 ---
 st.sidebar.header("📝 新增交易")
 
 trade_date = st.sidebar.date_input("交易日期 (買進日)", datetime.now())
-strategy = st.sidebar.selectbox("策略 (紀錄用)", ["突破追價", "拉回低接", "長期存股", "隔日沖", "抄底失敗"])
-stock_id = st.sidebar.text_input("股票代號/名稱", "2330 台積電")
+strategy = st.sidebar.selectbox("策略 (紀錄用)", ["突破追價", "拉回低接", "Alpha-Swing", "長期存股", "隔日沖", "抄底失敗"])
+stock_id_input = st.sidebar.text_input("股票代號 (例如: 2330)", "2330") # 建議只輸入代號，或者在程式碼中解析
+stock_name_input = st.sidebar.text_input("股票名稱 (選填)", "台積電")
+stock_full_name = f"{stock_id_input} {stock_name_input}"
 buy_price = st.sidebar.number_input("買入價格", min_value=0.0, step=0.1, format="%.2f")
+# V6.4 新增：止損價輸入
+stop_loss_price = st.sidebar.number_input("初始止損價 (風控)", min_value=0.0, step=0.1, format="%.2f", help="跌破此價格應考慮出場")
 volume = st.sidebar.number_input("買入股數", min_value=1, value=1000, step=1)
 discount = st.sidebar.number_input("手續費折數 (折)", value=2.8, step=0.1)
 
@@ -98,8 +137,9 @@ if st.sidebar.button("➕ 建倉"):
             "日期": date_str,
             "買入日期": date_str,
             "策略": strategy,
-            "代號": stock_id,
+            "代號": stock_full_name,
             "買入價": buy_price,
+            "止損價": stop_loss_price, # 寫入止損價
             "股數": volume,
             "狀態": "持倉中",
             "賣出價": 0.0,
@@ -116,40 +156,109 @@ if st.sidebar.button("➕ 建倉"):
     st.rerun()
 
 # --- 主畫面 ---
-st.title("📊 台股雲端戰情室 V6.2")
+st.title("📊 台股雲端戰情室 V6.5 (Alpha-Swing 風控版)")
 
 df = load_data()
 
-tab1, tab2, tab3, tab4 = st.tabs(["💼 持倉管理", "📜 歷史戰績", "📊 圖表分析", "🗑️ 資料管理"])
+tab1, tab2, tab3, tab4 = st.tabs(["💼 持倉監控", "📜 歷史戰績", "📊 圖表分析", "🗑️ 資料管理"])
 
-# === Tab 1: 持倉管理 ===
+# === Tab 1: 持倉監控 (含即時報價與風控) ===
 with tab1:
-    st.subheader("目前庫存部位")
+    st.subheader("目前庫存部位 & 風控監測")
     if not df.empty and "狀態" in df.columns:
-        open_positions = df[df["狀態"] == "持倉中"]
+        open_positions = df[df["狀態"] == "持倉中"].copy()
         
         if not open_positions.empty:
-            market_value = (open_positions["買入價"].astype(float) * open_positions["股數"].astype(int)).sum()
-            st.metric("庫存總成本 (約)", f"${market_value:,.0f}")
+            # 1. 解析股票代號並抓取即時報價
+            open_positions['code'] = open_positions['代號'].astype(str).str.extract(r'^(\d+)')
+            unique_codes = open_positions['code'].dropna().unique().tolist()
+            
+            realtime_prices = {}
+            if unique_codes:
+                with st.spinner("正在抓取即時股價..."):
+                    realtime_prices = get_realtime_prices(unique_codes)
+            
+            # 2. 計算未實現損益與即時市值
+            total_market_value = 0
+            total_unrealized_profit = 0
+            
+            # 準備顯示用的列表，逐行處理
+            display_rows = []
+            
+            for index, row in open_positions.iterrows():
+                code = row['code']
+                current_price = realtime_prices.get(code, row['買入價']) # 若抓不到，暫用買入價
+                
+                qty = float(row['股數'])
+                buy_p = float(row['買入價'])
+                stop_loss = float(row['止損價'])
+                
+                market_val = current_price * qty
+                # 簡易未實現損益 (未扣手續費稅)
+                unrealized = (current_price - buy_p) * qty
+                
+                total_market_value += market_val
+                total_unrealized_profit += unrealized
+                
+                # 判斷是否觸發止損
+                status_signal = "🟢 正常"
+                row_style = "" 
+                if stop_loss > 0 and current_price < stop_loss:
+                    status_signal = "🔴 破止損!"
+                
+                display_rows.append({
+                    "ID": row["ID"], # 保留ID供後續平倉使用
+                    "代號": row["代號"],
+                    "買入日期": row["買入日期"],
+                    "買入價": buy_p,
+                    "現價": current_price,
+                    "止損價": stop_loss,
+                    "股數": qty,
+                    "未實現損益": int(unrealized),
+                    "狀態訊號": status_signal
+                })
 
-            display_df = open_positions[["買入日期", "策略", "代號", "買入價", "股數", "手續費折數"]].copy()
-            st.dataframe(display_df, use_container_width=True)
+            # 3. 顯示總體指標
+            col_m1, col_m2, col_m3 = st.columns(3)
+            col_m1.metric("庫存總市值", f"${total_market_value:,.0f}")
+            col_m2.metric("預估未實現損益", f"${total_unrealized_profit:,.0f}", delta_color="normal")
+            col_m3.metric("持倉檔數", f"{len(open_positions)} 檔")
+
+            # 4. 顯示持倉明細 (使用 dataframe 的 style 功能來做風控警示)
+            results_df = pd.DataFrame(display_rows)
+            
+            # 定義樣式函式：如果觸發止損，整行標紅
+            def highlight_stop_loss(s):
+                is_danger = s["狀態訊號"] == "🔴 破止損!"
+                return ['background-color: #ffcccc' if is_danger else '' for _ in s]
+
+            st.dataframe(
+                results_df[["代號", "買入日期", "買入價", "現價", "止損價", "股數", "未實現損益", "狀態訊號"]].style.apply(highlight_stop_loss, axis=1),
+                use_container_width=True
+            )
+            
+            st.caption("* 註：未實現損益為預估值，尚未扣除手續費與稅金。")
             st.markdown("---")
             
-            options = {f"{row['代號']} ({row['買入日期']} 買 {row['股數']}股)": row['ID'] for index, row in open_positions.iterrows()}
+            # --- 平倉操作區 (保持原有功能) ---
+            options = {f"{row['代號']} (買入 ${row['買入價']} | 現價 ${row['現價']})": row['ID'] for row in display_rows}
             selected_label = st.selectbox("選擇要平倉的部位", list(options.keys()))
             
             if selected_label:
                 selected_id = options[selected_label]
                 target_row = df[df["ID"].astype(str) == str(selected_id)].iloc[0]
                 
+                # 自動帶入現價作為預設賣出價
+                # 從 display_rows 找回現價
+                current_market_price = next((item['現價'] for item in display_rows if str(item['ID']) == str(selected_id)), 0.0)
+                
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
                     sell_date_input = st.date_input("賣出日期", datetime.now())
                 with col2:
-                    sell_price = st.number_input("賣出價格", min_value=0.0, step=0.1, format="%.2f")
+                    sell_price = st.number_input("賣出價格", min_value=0.0, step=0.1, value=float(current_market_price), format="%.2f")
                 with col3:
-                    current_qty = int(target_row["股數"])
+                    current_qty = int(float(target_row["股數"]))
                     sell_qty = st.number_input("賣出股數", min_value=1, max_value=current_qty, value=current_qty)
                 with col4:
                     st.markdown("<br>", unsafe_allow_html=True)
@@ -158,7 +267,8 @@ with tab1:
                 if confirm_sell:
                     with st.spinner("計算損益..."):
                         d_rate = float(target_row["手續費折數"]) / 10
-                        buy_cost = int(float(target_row["買入價"]) * sell_qty)
+                        buy_p_val = float(target_row["買入價"])
+                        buy_cost = int(buy_p_val * sell_qty)
                         buy_fee = max(int(buy_cost * 0.001425 * d_rate), 1)
                         sell_revenue = int(sell_price * sell_qty)
                         sell_fee = max(int(sell_revenue * 0.001425 * d_rate), 1)
@@ -179,7 +289,7 @@ with tab1:
                                 df.at[original_idx, "狀態"] = "已平倉"
                                 df.at[original_idx, "賣出價"] = sell_price
                                 df.at[original_idx, "損益"] = profit
-                                df.at[original_idx, "日期"] = sell_date_str
+                                df.at[original_idx, "日期"] = sell_date_str # 這裡更新為賣出日期，作為該筆交易的結束時間
                                 df.at[original_idx, "買入日期"] = original_buy_date
                             else:
                                 remain_qty = current_qty - sell_qty
@@ -193,7 +303,7 @@ with tab1:
                                 new_closed_record["損益"] = profit
                                 new_closed_record["日期"] = sell_date_str
                                 new_closed_record["買入日期"] = original_buy_date
-                                new_closed_record["心得"] = "" # 新紀錄清空心得
+                                new_closed_record["心得"] = "" 
                                 
                                 df = pd.concat([pd.DataFrame([new_closed_record]), df], ignore_index=True)
 
@@ -206,7 +316,7 @@ with tab1:
     else:
         st.info("資料載入中...")
 
-# === Tab 2: 歷史戰績 (新增心得功能) ===
+# === Tab 2: 歷史戰績 (保持不變) ===
 with tab2:
     st.subheader("📜 已實現損益明細")
     if not df.empty and "狀態" in df.columns:
@@ -218,36 +328,26 @@ with tab2:
                 color = '#ff4b4b' if val > 0 else '#00c853'
                 return f'color: {color}; font-weight: bold;'
 
-            # 顯示表格包含心得
             display_cols = ["買入日期", "日期", "代號", "買入價", "賣出價", "損益", "心得"]
+            # 將 '日期' 顯示為 '賣出日期'
             show_df = closed_positions[display_cols].rename(columns={"日期": "賣出日期"})
             
             st.dataframe(show_df.style.applymap(highlight_profit, subset=['損益']), use_container_width=True)
             
-            # --- 編輯心得區域 ---
             st.markdown("---")
             st.subheader("✍️ 撰寫/修改交易心得")
-            
-            # 建立下拉選單，包含損益資訊讓使用者好找
             note_options = {
                 f"{row['日期']} | {row['代號']} | ${row['損益']}": row['ID'] 
                 for index, row in closed_positions.iterrows()
             }
-            
             selected_note_key = st.selectbox("選擇一筆交易來寫筆記", list(note_options.keys()))
-            
             if selected_note_key:
                 note_id = note_options[selected_note_key]
-                # 找到原始資料的那一行
                 current_row = df[df["ID"].astype(str) == str(note_id)].iloc[0]
                 current_note = current_row["心得"] if "心得" in current_row else ""
-                
-                # 文字輸入框，預設值帶入目前的心得
-                new_note = st.text_area("輸入你的檢討或筆記 (例如：太早賣出、凹單、遵守紀律...)", value=str(current_note), height=100)
-                
+                new_note = st.text_area("輸入你的檢討或筆記", value=str(current_note), height=100)
                 if st.button("💾 儲存心得"):
                     with st.spinner("儲存中..."):
-                        # 更新 DataFrame
                         idx_list = df.index[df['ID'].astype(str) == str(note_id)].tolist()
                         if idx_list:
                             df.at[idx_list[0], "心得"] = new_note
@@ -255,11 +355,10 @@ with tab2:
                             st.success("心得已更新！")
                             time.sleep(1)
                             st.rerun()
-            
         else:
             st.info("尚未有平倉紀錄")
 
-# === Tab 3: 圖表分析 ===
+# === Tab 3: 圖表分析 (修正持倉天數邏輯) ===
 with tab3:
     st.subheader("📈 交易數據分析")
     
@@ -283,29 +382,32 @@ with tab3:
             
             with col1:
                 # 2. 每週損益
-                st.markdown("##### 📅 每週損益 (Weekly P/L)")
+                st.markdown("##### 📅 每週損益")
                 closed_df["週次"] = closed_df["日期"].dt.strftime('%Y-W%U')
                 weekly_perf = closed_df.groupby("週次")["損益"].sum().reset_index()
-                
                 fig_bar = px.bar(weekly_perf, x="週次", y="損益",
                                  color="損益",
                                  color_continuous_scale=["#00c853", "#ff4b4b"],
                                  text_auto=True)
-                fig_bar.update_layout(xaxis=dict(type='category'))
                 st.plotly_chart(fig_bar, use_container_width=True)
                 
             with col2:
-                # 3. 持倉天數
+                # 3. 持倉天數 (V6.5 修正邏輯)
                 st.markdown("##### ⏳ 持倉天數 vs 損益")
+                # 直接計算天數差，當天買賣會是 0
                 closed_df["持倉天數"] = (closed_df["日期"] - closed_df["買入日期"]).dt.days
-                closed_df["持倉天數"] = closed_df["持倉天數"].apply(lambda x: 1 if x < 1 else x)
+                
+                # 為了讓圖表上的 0 比較明顯，我們可以加一個 jitter 或保持原樣
+                # 這裡保持原樣，0 就是 0 (當沖)
                 
                 fig_scatter = px.scatter(closed_df, x="持倉天數", y="損益",
                                          color="損益",
                                          size=closed_df["損益"].abs(),
-                                         hover_data=["代號", "買入日期", "心得"], # 這裡也把心得加進去，滑鼠移過去看得到
+                                         hover_data=["代號", "買入日期", "心得"],
                                          color_continuous_scale=["#00c853", "#ff4b4b"])
                 fig_scatter.add_hline(y=0, line_dash="dash", line_color="gray")
+                # 強制 X 軸包含 0
+                fig_scatter.update_layout(xaxis=dict(tickmode='linear', tick0=0, dtick=1))
                 st.plotly_chart(fig_scatter, use_container_width=True)
 
         else:

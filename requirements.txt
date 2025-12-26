@@ -1,5 +1,7 @@
 streamlit
 pandas
+plotly
 gspread
 google-auth
-plotly
+twstock
+lxml
