@@ -9,7 +9,7 @@ import plotly.express as px
 import yfinance as yf
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="台股雲端戰情室 V6.7", page_icon="📈", layout="wide")
+st.set_page_config(page_title="台股雲端戰情室 V6.8", page_icon="📈", layout="wide")
 
 # --- Google Sheets 設定 ---
 SHEET_ID = "1-NbOD6TcHiRVDzWB5MXq6JVo7B73o31mPPPmltph_CA"
@@ -64,6 +64,7 @@ def load_data():
         df["買入價"] = pd.to_numeric(df["買入價"], errors='coerce').fillna(0.0)
         df["止損價"] = pd.to_numeric(df["止損價"], errors='coerce').fillna(0.0)
         df["股數"] = pd.to_numeric(df["股數"], errors='coerce').fillna(0)
+        df["手續費折數"] = pd.to_numeric(df["手續費折數"], errors='coerce').fillna(3.0) # 預設3折防呆
         df["心得"] = df["心得"].fillna("")
             
         return df
@@ -83,12 +84,8 @@ def save_data(df):
     data = [df_to_save.columns.values.tolist()] + df_to_save.values.tolist()
     sheet.update(data)
 
-# --- V6.7 核心修正：智慧判斷上市(.TW)與上櫃(.TWO) ---
+# --- 報價抓取函式 (V6.7 邏輯) ---
 def get_realtime_prices(stock_codes):
-    """
-    逐一嘗試 .TW 與 .TWO，確保抓到正確股價
-    回傳: (prices_dict, debug_logs)
-    """
     if not stock_codes:
         return {}, []
     
@@ -96,7 +93,6 @@ def get_realtime_prices(stock_codes):
     logs = []
     
     for code in stock_codes:
-        # 定義嘗試順序：先假設是上市 (.TW)，若失敗再試上櫃 (.TWO)
         suffixes = ['.TW', '.TWO']
         price_found = False
         
@@ -105,29 +101,24 @@ def get_realtime_prices(stock_codes):
                 ticker_name = f"{code}{suffix}"
                 stock = yf.Ticker(ticker_name)
                 
-                # 方法 1: 嘗試 fast_info (最即時)
                 current_price = None
                 if hasattr(stock, 'fast_info') and 'last_price' in stock.fast_info:
                     p = stock.fast_info['last_price']
-                    # 必須確認價格有效且非 None
                     if p is not None and p > 0:
                         current_price = p
                 
-                # 方法 2: 若 fast_info 無效，嘗試 history (抓最近 5 天以防假日)
                 if current_price is None:
                     hist = stock.history(period="5d")
                     if not hist.empty:
                         current_price = hist['Close'].iloc[-1]
                 
-                # 判定是否成功抓到
                 if current_price is not None:
                     prices[code] = float(current_price)
                     logs.append(f"✅ {code} -> 成功 ({ticker_name}): {current_price:.2f}")
                     price_found = True
-                    break # 成功就跳出 suffix 迴圈，不用試下一個了
+                    break 
                 
             except Exception as e:
-                # 單一後綴失敗，繼續嘗試下一個
                 continue
         
         if not price_found:
@@ -178,20 +169,20 @@ if st.sidebar.button("➕ 建倉"):
     st.rerun()
 
 # --- 主畫面 ---
-st.title("📊 台股雲端戰情室 V6.7 (智慧報價版)")
+st.title("📊 台股雲端戰情室 V6.8 (精準損益+動態止損)")
 
 df = load_data()
 
-tab1, tab2, tab3, tab4 = st.tabs(["💼 持倉監控", "📜 歷史戰績", "📊 圖表分析", "🗑️ 資料管理"])
+tab1, tab2, tab3, tab4 = st.tabs(["💼 持倉與風控", "📜 歷史戰績", "📊 圖表分析", "🗑️ 資料管理"])
 
-# === Tab 1: 持倉監控 ===
+# === Tab 1: 持倉與風控 (V6.8 核心) ===
 with tab1:
-    st.subheader("目前庫存部位 & 風控監測")
+    st.subheader("目前庫存部位")
     if not df.empty and "狀態" in df.columns:
         open_positions = df[df["狀態"] == "持倉中"].copy()
         
         if not open_positions.empty:
-            # 1. 解析股票代號
+            # 1. 抓報價
             open_positions['code'] = open_positions['代號'].astype(str).str.extract(r'^(\d+)')
             unique_codes = open_positions['code'].dropna().unique().tolist()
             
@@ -199,80 +190,139 @@ with tab1:
             debug_logs = []
             
             if unique_codes:
-                with st.spinner("正在智慧搜尋股價 (上市/上櫃)..."):
+                with st.spinner("正在計算即時淨損益..."):
                     realtime_prices, debug_logs = get_realtime_prices(unique_codes)
             
-            # --- V6.7 新增：除錯資訊展開 ---
-            with st.expander("查看報價抓取狀態 (Debug Info)"):
+            with st.expander("查看報價狀態"):
                 for log in debug_logs:
                     st.text(log)
-            # ---------------------------
 
-            # 2. 計算未實現損益
+            # 2. 計算「含費稅」的精準未實現損益
             total_market_value = 0
-            total_unrealized_profit = 0
-            display_rows = []
+            total_unrealized_net_profit = 0
+            
+            # 用來顯示在編輯器中的資料
+            editor_data = []
             
             for index, row in open_positions.iterrows():
                 code = row['code']
-                # 若抓不到現價，回退使用買入價
                 current_price = realtime_prices.get(code, row['買入價']) 
                 
                 qty = float(row['股數'])
                 buy_p = float(row['買入價'])
                 stop_loss = float(row['止損價'])
+                disc = float(row['手續費折數']) / 10.0
                 
                 market_val = current_price * qty
-                unrealized = (current_price - buy_p) * qty
+                cost_val = buy_p * qty
+                
+                # --- V6.8 新增：費用計算 ---
+                # 買入手續費 (最低 1 元)
+                buy_fee = max(int(cost_val * 0.001425 * disc), 1)
+                # 賣出手續費 (模擬)
+                sell_fee = max(int(market_val * 0.001425 * disc), 1)
+                # 證交稅 (0.3%)
+                tax = int(market_val * 0.003)
+                
+                # 精準淨損益 = (市值 - 賣出費 - 稅) - (成本 + 買入費)
+                net_profit = (market_val - sell_fee - tax) - (cost_val + buy_fee)
                 
                 total_market_value += market_val
-                total_unrealized_profit += unrealized
+                total_unrealized_net_profit += net_profit
                 
-                status_signal = "🟢 正常"
+                status_signal = "🟢"
                 if stop_loss > 0 and current_price < stop_loss:
-                    status_signal = "🔴 破止損!"
+                    status_signal = "🔴 破止損"
+                elif net_profit > 0:
+                     status_signal = "💰 獲利中"
                 
-                display_rows.append({
-                    "ID": row["ID"],
+                # 準備資料給 Data Editor
+                editor_data.append({
+                    "ID": row["ID"], # 隱藏但必須存在以利對應
                     "代號": row["代號"],
                     "買入日期": row["買入日期"],
                     "買入價": buy_p,
-                    "現價": current_price,
-                    "止損價": stop_loss,
-                    "股數": qty,
-                    "未實現損益": int(unrealized),
-                    "狀態訊號": status_signal
+                    "股數": int(qty),
+                    "手續費折數": row["手續費折數"],
+                    "止損價": stop_loss, # 這是我們要讓使用者編輯的重點
+                    "現價(參考)": current_price,
+                    "預估淨損益": int(net_profit),
+                    "狀態": status_signal
                 })
 
-            # 3. 顯示看板
+            # 3. 顯示總體指標
             col_m1, col_m2, col_m3 = st.columns(3)
             col_m1.metric("庫存總市值", f"${total_market_value:,.0f}")
-            col_m2.metric("預估未實現損益", f"${total_unrealized_profit:,.0f}", delta_color="normal")
+            col_m2.metric("預估未實現「淨」損益", f"${total_unrealized_net_profit:,.0f}", delta_color="normal", help="已扣除買賣手續費與證交稅")
             col_m3.metric("持倉檔數", f"{len(open_positions)} 檔")
 
-            # 4. 表格顯示
-            results_df = pd.DataFrame(display_rows)
-            def highlight_stop_loss(s):
-                is_danger = s["狀態訊號"] == "🔴 破止損!"
-                return ['background-color: #ffcccc' if is_danger else '' for _ in s]
+            st.markdown("---")
+            st.info("💡 **提示**：您可以直接在下方表格修改 **「止損價」**，修改後請點擊下方的 **「💾 儲存變更」** 按鈕來更新風控設定。")
 
-            st.dataframe(
-                results_df[["代號", "買入日期", "買入價", "現價", "止損價", "股數", "未實現損益", "狀態訊號"]].style.apply(highlight_stop_loss, axis=1),
-                use_container_width=True
+            # 4. 可編輯的表格 (Data Editor)
+            editor_df = pd.DataFrame(editor_data)
+            
+            # 設定欄位組態 (ID 不可編, 現價不可編, 損益不可編)
+            edited_df = st.data_editor(
+                editor_df,
+                column_config={
+                    "ID": st.column_config.TextColumn(disabled=True),
+                    "代號": st.column_config.TextColumn(disabled=True),
+                    "買入日期": st.column_config.TextColumn(disabled=True),
+                    "買入價": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
+                    "股數": st.column_config.NumberColumn(disabled=True),
+                    "手續費折數": st.column_config.NumberColumn(disabled=True),
+                    "現價(參考)": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
+                    "預估淨損益": st.column_config.NumberColumn(disabled=True, format="$%d"),
+                    "狀態": st.column_config.TextColumn(disabled=True),
+                    "止損價": st.column_config.NumberColumn(label="✏️ 修改止損價", required=True, step=0.1, format="$%.2f")
+                },
+                hide_index=True,
+                use_container_width=True,
+                key="position_editor"
             )
             
-            st.caption("* 註：價格來源 Yahoo Finance (延遲 15 分鐘)。若未顯示損益，請檢查 Debug 資訊。")
+            # 5. 儲存變更按鈕
+            if st.button("💾 儲存止損價變更"):
+                with st.spinner("正在更新 Google Sheets..."):
+                    has_changes = False
+                    current_db = load_data() # 重新讀取確保資料最新
+                    
+                    # 比對 edited_df 與 原始資料，更新止損價
+                    for index, row in edited_df.iterrows():
+                        row_id = str(row["ID"])
+                        new_stop_loss = float(row["止損價"])
+                        
+                        # 在原始資料中找到對應的 ID
+                        mask = current_db["ID"].astype(str) == row_id
+                        if mask.any():
+                            # 檢查值是否有變
+                            old_val = float(current_db.loc[mask, "止損價"].values[0])
+                            if abs(old_val - new_stop_loss) > 0.001:
+                                current_db.loc[mask, "止損價"] = new_stop_loss
+                                has_changes = True
+                    
+                    if has_changes:
+                        save_data(current_db)
+                        st.success("✅ 止損價已更新！")
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.info("沒有偵測到數值變更。")
+
             st.markdown("---")
             
-            # --- 平倉區 ---
-            options = {f"{row['代號']} (買入 ${row['買入價']} | 現價 ${row['現價']})": row['ID'] for row in display_rows}
+            # --- 平倉操作區 ---
+            st.subheader("⚡ 執行平倉")
+            options = {f"{row['代號']} (淨損益 ${row['預估淨損益']})": row['ID'] for row in editor_data}
             selected_label = st.selectbox("選擇要平倉的部位", list(options.keys()))
             
             if selected_label:
                 selected_id = options[selected_label]
                 target_row = df[df["ID"].astype(str) == str(selected_id)].iloc[0]
                 
-                current_market_price = next((item['現價'] for item in display_rows if str(item['ID']) == str(selected_id)), 0.0)
+                # 自動帶入現價
+                current_market_price = next((item['現價(參考)'] for item in editor_data if str(item['ID']) == str(selected_id)), 0.0)
                 
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
@@ -284,18 +334,23 @@ with tab1:
                     sell_qty = st.number_input("賣出股數", min_value=1, max_value=current_qty, value=current_qty)
                 with col4:
                     st.markdown("<br>", unsafe_allow_html=True)
-                    confirm_sell = st.button("⚡ 執行賣出")
+                    confirm_sell = st.button("🔴 確認賣出")
 
                 if confirm_sell:
-                    with st.spinner("計算損益..."):
+                    with st.spinner("計算最終損益..."):
                         d_rate = float(target_row["手續費折數"]) / 10
                         buy_p_val = float(target_row["買入價"])
-                        buy_cost = int(buy_p_val * sell_qty)
-                        buy_fee = max(int(buy_cost * 0.001425 * d_rate), 1)
+                        
+                        # 最終平倉計算 (含費稅)
+                        buy_cost_raw = buy_p_val * sell_qty
+                        buy_fee = max(int(buy_cost_raw * 0.001425 * d_rate), 1)
+                        
                         sell_revenue = int(sell_price * sell_qty)
                         sell_fee = max(int(sell_revenue * 0.001425 * d_rate), 1)
                         tax = int(sell_revenue * 0.003)
-                        profit = sell_revenue - sell_fee - tax - (buy_cost + buy_fee)
+                        
+                        # 淨利
+                        net_profit = sell_revenue - sell_fee - tax - (buy_cost_raw + buy_fee)
                         
                         df = load_data()
                         idx_list = df.index[df['ID'].astype(str) == str(selected_id)].tolist()
@@ -310,7 +365,7 @@ with tab1:
                             if sell_qty == current_qty:
                                 df.at[original_idx, "狀態"] = "已平倉"
                                 df.at[original_idx, "賣出價"] = sell_price
-                                df.at[original_idx, "損益"] = profit
+                                df.at[original_idx, "損益"] = net_profit
                                 df.at[original_idx, "日期"] = sell_date_str 
                                 df.at[original_idx, "買入日期"] = original_buy_date
                             else:
@@ -322,7 +377,7 @@ with tab1:
                                 new_closed_record["股數"] = sell_qty
                                 new_closed_record["賣出價"] = sell_price
                                 new_closed_record["狀態"] = "已平倉"
-                                new_closed_record["損益"] = profit
+                                new_closed_record["損益"] = net_profit
                                 new_closed_record["日期"] = sell_date_str
                                 new_closed_record["買入日期"] = original_buy_date
                                 new_closed_record["心得"] = "" 
@@ -330,7 +385,7 @@ with tab1:
                                 df = pd.concat([pd.DataFrame([new_closed_record]), df], ignore_index=True)
 
                             save_data(df)
-                            st.success(f"平倉完成！損益: {profit}")
+                            st.success(f"平倉完成！淨損益: {net_profit}")
                             time.sleep(1)
                             st.rerun()
         else:
