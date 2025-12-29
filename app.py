@@ -9,7 +9,15 @@ import plotly.express as px
 import yfinance as yf
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="台股雲端戰情室 V6.8", page_icon="📈", layout="wide")
+st.set_page_config(page_title="台股雲端戰情室 V6.9", page_icon="📈", layout="wide")
+
+# --- 初始化 Session State (V6.9 關鍵：用來暫存股價) ---
+if "realtime_prices" not in st.session_state:
+    st.session_state.realtime_prices = {}
+if "price_update_time" not in st.session_state:
+    st.session_state.price_update_time = None
+if "debug_logs" not in st.session_state:
+    st.session_state.debug_logs = []
 
 # --- Google Sheets 設定 ---
 SHEET_ID = "1-NbOD6TcHiRVDzWB5MXq6JVo7B73o31mPPPmltph_CA"
@@ -64,7 +72,7 @@ def load_data():
         df["買入價"] = pd.to_numeric(df["買入價"], errors='coerce').fillna(0.0)
         df["止損價"] = pd.to_numeric(df["止損價"], errors='coerce').fillna(0.0)
         df["股數"] = pd.to_numeric(df["股數"], errors='coerce').fillna(0)
-        df["手續費折數"] = pd.to_numeric(df["手續費折數"], errors='coerce').fillna(3.0) # 預設3折防呆
+        df["手續費折數"] = pd.to_numeric(df["手續費折數"], errors='coerce').fillna(3.0) 
         df["心得"] = df["心得"].fillna("")
             
         return df
@@ -84,7 +92,7 @@ def save_data(df):
     data = [df_to_save.columns.values.tolist()] + df_to_save.values.tolist()
     sheet.update(data)
 
-# --- 報價抓取函式 (V6.7 邏輯) ---
+# --- 報價抓取函式 ---
 def get_realtime_prices(stock_codes):
     if not stock_codes:
         return {}, []
@@ -169,43 +177,56 @@ if st.sidebar.button("➕ 建倉"):
     st.rerun()
 
 # --- 主畫面 ---
-st.title("📊 台股雲端戰情室 V6.8 (精準損益+動態止損)")
+st.title("📊 台股雲端戰情室 V6.9 (手動更新模式)")
 
 df = load_data()
 
 tab1, tab2, tab3, tab4 = st.tabs(["💼 持倉與風控", "📜 歷史戰績", "📊 圖表分析", "🗑️ 資料管理"])
 
-# === Tab 1: 持倉與風控 (V6.8 核心) ===
+# === Tab 1: 持倉與風控 (V6.9 手動更新版) ===
 with tab1:
     st.subheader("目前庫存部位")
     if not df.empty and "狀態" in df.columns:
         open_positions = df[df["狀態"] == "持倉中"].copy()
         
         if not open_positions.empty:
-            # 1. 抓報價
             open_positions['code'] = open_positions['代號'].astype(str).str.extract(r'^(\d+)')
             unique_codes = open_positions['code'].dropna().unique().tolist()
             
-            realtime_prices = {}
-            debug_logs = []
+            # --- V6.9 修改：手動更新按鈕區 ---
+            col_update, col_time = st.columns([1, 3])
+            with col_update:
+                if st.button("🔄 更新即時股價", type="primary"):
+                    if unique_codes:
+                        with st.spinner("正在連線 Yahoo Finance 更新報價..."):
+                            prices, logs = get_realtime_prices(unique_codes)
+                            # 將結果存入 Session State，這樣頁面重新整理時資料不會消失
+                            st.session_state.realtime_prices = prices
+                            st.session_state.debug_logs = logs
+                            st.session_state.price_update_time = datetime.now().strftime("%H:%M:%S")
             
-            if unique_codes:
-                with st.spinner("正在計算即時淨損益..."):
-                    realtime_prices, debug_logs = get_realtime_prices(unique_codes)
+            with col_time:
+                if st.session_state.price_update_time:
+                    st.success(f"最後更新時間: {st.session_state.price_update_time}")
+                else:
+                    st.info("尚未更新股價，目前顯示買入成本或舊資料。")
+
+            # --- 取用 Session State 中的資料 ---
+            realtime_prices = st.session_state.realtime_prices
+            debug_logs = st.session_state.debug_logs
             
-            with st.expander("查看報價狀態"):
+            with st.expander("查看詳細報價狀態"):
                 for log in debug_logs:
                     st.text(log)
 
-            # 2. 計算「含費稅」的精準未實現損益
+            # 2. 計算與顯示
             total_market_value = 0
             total_unrealized_net_profit = 0
-            
-            # 用來顯示在編輯器中的資料
             editor_data = []
             
             for index, row in open_positions.iterrows():
                 code = row['code']
+                # 從 Session State 拿價格，拿不到就用買入價
                 current_price = realtime_prices.get(code, row['買入價']) 
                 
                 qty = float(row['股數'])
@@ -216,15 +237,11 @@ with tab1:
                 market_val = current_price * qty
                 cost_val = buy_p * qty
                 
-                # --- V6.8 新增：費用計算 ---
-                # 買入手續費 (最低 1 元)
+                # 費用計算
                 buy_fee = max(int(cost_val * 0.001425 * disc), 1)
-                # 賣出手續費 (模擬)
                 sell_fee = max(int(market_val * 0.001425 * disc), 1)
-                # 證交稅 (0.3%)
                 tax = int(market_val * 0.003)
                 
-                # 精準淨損益 = (市值 - 賣出費 - 稅) - (成本 + 買入費)
                 net_profit = (market_val - sell_fee - tax) - (cost_val + buy_fee)
                 
                 total_market_value += market_val
@@ -236,33 +253,29 @@ with tab1:
                 elif net_profit > 0:
                      status_signal = "💰 獲利中"
                 
-                # 準備資料給 Data Editor
                 editor_data.append({
-                    "ID": row["ID"], # 隱藏但必須存在以利對應
+                    "ID": row["ID"],
                     "代號": row["代號"],
                     "買入日期": row["買入日期"],
                     "買入價": buy_p,
                     "股數": int(qty),
                     "手續費折數": row["手續費折數"],
-                    "止損價": stop_loss, # 這是我們要讓使用者編輯的重點
+                    "止損價": stop_loss,
                     "現價(參考)": current_price,
                     "預估淨損益": int(net_profit),
                     "狀態": status_signal
                 })
 
-            # 3. 顯示總體指標
             col_m1, col_m2, col_m3 = st.columns(3)
             col_m1.metric("庫存總市值", f"${total_market_value:,.0f}")
-            col_m2.metric("預估未實現「淨」損益", f"${total_unrealized_net_profit:,.0f}", delta_color="normal", help="已扣除買賣手續費與證交稅")
+            col_m2.metric("預估未實現「淨」損益", f"${total_unrealized_net_profit:,.0f}", delta_color="normal")
             col_m3.metric("持倉檔數", f"{len(open_positions)} 檔")
 
             st.markdown("---")
-            st.info("💡 **提示**：您可以直接在下方表格修改 **「止損價」**，修改後請點擊下方的 **「💾 儲存變更」** 按鈕來更新風控設定。")
+            st.info("💡 **提示**：現在您可以安心編輯下方表格，股價只有在您點擊上方「更新按鈕」時才會變動。")
 
-            # 4. 可編輯的表格 (Data Editor)
+            # 可編輯表格
             editor_df = pd.DataFrame(editor_data)
-            
-            # 設定欄位組態 (ID 不可編, 現價不可編, 損益不可編)
             edited_df = st.data_editor(
                 editor_df,
                 column_config={
@@ -282,21 +295,17 @@ with tab1:
                 key="position_editor"
             )
             
-            # 5. 儲存變更按鈕
             if st.button("💾 儲存止損價變更"):
                 with st.spinner("正在更新 Google Sheets..."):
                     has_changes = False
-                    current_db = load_data() # 重新讀取確保資料最新
+                    current_db = load_data()
                     
-                    # 比對 edited_df 與 原始資料，更新止損價
                     for index, row in edited_df.iterrows():
                         row_id = str(row["ID"])
                         new_stop_loss = float(row["止損價"])
                         
-                        # 在原始資料中找到對應的 ID
                         mask = current_db["ID"].astype(str) == row_id
                         if mask.any():
-                            # 檢查值是否有變
                             old_val = float(current_db.loc[mask, "止損價"].values[0])
                             if abs(old_val - new_stop_loss) > 0.001:
                                 current_db.loc[mask, "止損價"] = new_stop_loss
@@ -321,7 +330,6 @@ with tab1:
                 selected_id = options[selected_label]
                 target_row = df[df["ID"].astype(str) == str(selected_id)].iloc[0]
                 
-                # 自動帶入現價
                 current_market_price = next((item['現價(參考)'] for item in editor_data if str(item['ID']) == str(selected_id)), 0.0)
                 
                 col1, col2, col3, col4 = st.columns(4)
@@ -341,7 +349,6 @@ with tab1:
                         d_rate = float(target_row["手續費折數"]) / 10
                         buy_p_val = float(target_row["買入價"])
                         
-                        # 最終平倉計算 (含費稅)
                         buy_cost_raw = buy_p_val * sell_qty
                         buy_fee = max(int(buy_cost_raw * 0.001425 * d_rate), 1)
                         
@@ -349,7 +356,6 @@ with tab1:
                         sell_fee = max(int(sell_revenue * 0.001425 * d_rate), 1)
                         tax = int(sell_revenue * 0.003)
                         
-                        # 淨利
                         net_profit = sell_revenue - sell_fee - tax - (buy_cost_raw + buy_fee)
                         
                         df = load_data()
