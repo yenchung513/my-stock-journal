@@ -199,6 +199,7 @@ if not df.empty and "狀態" in df.columns:
             qty_h = int(target_pos["股數"])
             disc_h = float(target_pos["手續費折數"]) / 10.0
             
+            # --- 之前報錯的行數在這裡，已修復 ---
             target_sell_price = st.sidebar.number_input("目標賣出價", value=cost_p, min_value=0.0, step=0.1, format="%.2f")
             
             buy_cost_val = cost_p * qty_h
@@ -230,7 +231,7 @@ st.title("📱 台股戰情室 V8.1")
 
 tab1, tab2, tab3, tab4 = st.tabs(["💼 持倉", "📜 歷史", "📊 分析", "🗑️ 管理"])
 
-# === Tab 1: 持倉 (新增顯示買入日) ===
+# === Tab 1: 持倉 ===
 with tab1:
     if not df.empty and "狀態" in df.columns:
         open_positions = df[df["狀態"] == "持倉中"].copy()
@@ -284,7 +285,7 @@ with tab1:
                     "現價": current_price,
                     "損益": int(net_profit),
                     "折數": row["手續費折數"],
-                    "買入日期": row["買入日期"] # 這裡已經有了，下面顯示出來
+                    "買入日期": row["買入日期"]
                 })
 
             col_m1, col_m2 = st.columns(2)
@@ -295,7 +296,6 @@ with tab1:
             st.caption("📋 持倉明細")
             display_df = pd.DataFrame(display_data)
             
-            # V8.1 修改：加入 '買入日期'
             mobile_cols = ["代號", "買入日期", "股數", "現價", "損益"]
             
             st.dataframe(
@@ -389,7 +389,7 @@ with tab1:
     else:
         st.info("載入中...")
 
-# === Tab 2: 歷史 (新增顯示買入日) ===
+# === Tab 2: 歷史 ===
 with tab2:
     if not df.empty and "狀態" in df.columns:
         closed_positions = df[df["狀態"] == "已平倉"].copy()
@@ -420,7 +420,6 @@ with tab2:
                 color = '#ff4b4b' if val > 0 else '#00c853'
                 return f'color: {color}; font-weight: bold;'
 
-            # V8.1 修改：加入 '買入日期' 並顯示在最前
             display_cols = ["買入日期", "日期", "代號", "損益", "心得"]
             show_df = closed_positions[display_cols].rename(columns={"日期": "賣出日"})
             
