@@ -10,7 +10,7 @@ import yfinance as yf
 
 # --- 頁面設定 ---
 st.set_page_config(
-    page_title="台股戰情室 V8.1", 
+    page_title="台股戰情室 V8.2", 
     page_icon="📱", 
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -77,6 +77,7 @@ def load_data():
             df["買入日期"] = df["買入日期"].fillna(df["日期"])
         
         df["買入價"] = pd.to_numeric(df["買入價"], errors='coerce').fillna(0.0)
+        df["賣出價"] = pd.to_numeric(df["賣出價"], errors='coerce').fillna(0.0)
         df["股數"] = pd.to_numeric(df["股數"], errors='coerce').fillna(0)
         df["手續費折數"] = pd.to_numeric(df["手續費折數"], errors='coerce').fillna(3.0) 
         df["心得"] = df["心得"].fillna("")
@@ -199,7 +200,6 @@ if not df.empty and "狀態" in df.columns:
             qty_h = int(target_pos["股數"])
             disc_h = float(target_pos["手續費折數"]) / 10.0
             
-            # --- 之前報錯的行數在這裡，已修復 ---
             target_sell_price = st.sidebar.number_input("目標賣出價", value=cost_p, min_value=0.0, step=0.1, format="%.2f")
             
             buy_cost_val = cost_p * qty_h
@@ -227,7 +227,7 @@ else:
 
 
 # --- 主畫面 ---
-st.title("📱 台股戰情室 V8.1")
+st.title("📱 台股戰情室 V8.2")
 
 tab1, tab2, tab3, tab4 = st.tabs(["💼 持倉", "📜 歷史", "📊 分析", "🗑️ 管理"])
 
@@ -280,7 +280,7 @@ with tab1:
                 display_data.append({
                     "ID": row["ID"],
                     "代號": row["代號"],
-                    "買價": buy_p,
+                    "買入價": buy_p,
                     "股數": int(qty),
                     "現價": current_price,
                     "損益": int(net_profit),
@@ -296,10 +296,11 @@ with tab1:
             st.caption("📋 持倉明細")
             display_df = pd.DataFrame(display_data)
             
-            mobile_cols = ["代號", "買入日期", "股數", "現價", "損益"]
+            mobile_cols = ["代號", "買入日期", "買入價", "現價", "損益"]
             
             st.dataframe(
                 display_df[mobile_cols].style.format({
+                    "買入價": "{:.2f}",
                     "現價": "{:.2f}",
                     "損益": "{:+d}",
                 }),
@@ -389,7 +390,7 @@ with tab1:
     else:
         st.info("載入中...")
 
-# === Tab 2: 歷史 ===
+# === Tab 2: 歷史 (V8.2 新增買賣價 + 格式化) ===
 with tab2:
     if not df.empty and "狀態" in df.columns:
         closed_positions = df[df["狀態"] == "已平倉"].copy()
@@ -420,10 +421,21 @@ with tab2:
                 color = '#ff4b4b' if val > 0 else '#00c853'
                 return f'color: {color}; font-weight: bold;'
 
-            display_cols = ["買入日期", "日期", "代號", "損益", "心得"]
+            # V8.2 新增：買入價、賣出價
+            display_cols = ["買入日期", "日期", "代號", "買入價", "賣出價", "損益", "心得"]
             show_df = closed_positions[display_cols].rename(columns={"日期": "賣出日"})
             
-            st.dataframe(show_df.style.applymap(highlight_profit, subset=['損益']), use_container_width=True, hide_index=True)
+            # V8.2 新增：強制格式化小數點 (column_config)
+            st.dataframe(
+                show_df.style.applymap(highlight_profit, subset=['損益']),
+                column_config={
+                    "買入價": st.column_config.NumberColumn(format="%.2f"),
+                    "賣出價": st.column_config.NumberColumn(format="%.2f"),
+                    "損益": st.column_config.NumberColumn(format="%d"),
+                },
+                use_container_width=True, 
+                hide_index=True
+            )
             
             st.markdown("---")
             st.subheader("✍️ 心得筆記")
