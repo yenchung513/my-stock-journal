@@ -8,9 +8,9 @@ import json
 import plotly.express as px
 import yfinance as yf
 
-# --- 頁面設定 (行動版優化: 預設收起側邊欄) ---
+# --- 頁面設定 (維持行動版優化) ---
 st.set_page_config(
-    page_title="台股戰情室 V7.1 (行動版)", 
+    page_title="台股戰情室 V8.0", 
     page_icon="📱", 
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -140,7 +140,10 @@ def get_realtime_prices(stock_codes):
             
     return prices, logs
 
-# --- 側邊欄：新增交易 ---
+# --- 讀取資料 (全域) ---
+df = load_data()
+
+# --- 側邊欄 ---
 st.sidebar.header("📝 新增交易")
 
 trade_date = st.sidebar.date_input("交易日期", datetime.now())
@@ -154,7 +157,8 @@ discount = st.sidebar.number_input("手續費折數", value=2.8, step=0.1)
 
 if st.sidebar.button("➕ 建倉", use_container_width=True):
     with st.spinner("寫入中..."):
-        df = load_data()
+        # 重新讀取以防覆蓋
+        df_fresh = load_data() 
         new_id = str(int(time.time() * 1000))
         date_str = trade_date.strftime("%Y-%m-%d")
         
@@ -173,17 +177,63 @@ if st.sidebar.button("➕ 建倉", use_container_width=True):
             "心得": ""
         }
         
-        df = pd.concat([pd.DataFrame([new_data]), df], ignore_index=True)
-        save_data(df)
+        df_fresh = pd.concat([pd.DataFrame([new_data]), df_fresh], ignore_index=True)
+        save_data(df_fresh)
     
     st.sidebar.success(f"建倉成功！")
     time.sleep(1)
     st.rerun()
 
-# --- 主畫面 ---
-st.title("📱 台股戰情室 V7.1")
+st.sidebar.markdown("---")
 
-df = load_data()
+# --- V8.0 新功能：側邊欄出場試算機 ---
+st.sidebar.header("🧮 出場試算機")
+if not df.empty and "狀態" in df.columns:
+    open_ops = df[df["狀態"] == "持倉中"]
+    if not open_ops.empty:
+        # 製作選單
+        calc_options = {f"{row['代號']} (成本 {row['買入價']})": index for index, row in open_ops.iterrows()}
+        selected_calc_idx = st.sidebar.selectbox("選擇庫存", list(calc_options.keys()))
+        
+        if selected_calc_idx is not None:
+            # 取得該筆資料
+            target_pos = open_ops.loc[calc_options[selected_calc_idx]]
+            cost_p = float(target_pos["買入價"])
+            qty_h = int(target_pos["股數"])
+            disc_h = float(target_pos["手續費折數"]) / 10.0
+            
+            # 目標價輸入
+            target_sell_price = st.sidebar.number_input("目標賣出價", value=cost_p, min_value=0.0, step=0.1, format="%.2f")
+            
+            # 即時計算
+            buy_cost_val = cost_p * qty_h
+            buy_fee_val = max(int(buy_cost_val * 0.001425 * disc_h), 1)
+            
+            sell_val = target_sell_price * qty_h
+            sell_fee_val = max(int(sell_val * 0.001425 * disc_h), 1)
+            tax_val = int(sell_val * 0.003)
+            
+            net_p = sell_val - sell_fee_val - tax_val - (buy_cost_val + buy_fee_val)
+            roi = (net_p / (buy_cost_val + buy_fee_val)) * 100 if buy_cost_val > 0 else 0
+            
+            # 顯示結果
+            if net_p > 0:
+                st.sidebar.success(f"預估淨利: ${int(net_p)}")
+            elif net_p < 0:
+                st.sidebar.error(f"預估虧損: ${int(net_p)}")
+            else:
+                st.sidebar.info("預估損益: $0")
+                
+            st.sidebar.caption(f"報酬率: {roi:.2f}% | 稅金: ${tax_val}")
+
+    else:
+        st.sidebar.caption("無庫存可試算")
+else:
+    st.sidebar.caption("無資料")
+
+
+# --- 主畫面 ---
+st.title("📱 台股戰情室 V8.0")
 
 tab1, tab2, tab3, tab4 = st.tabs(["💼 持倉", "📜 歷史", "📊 分析", "🗑️ 管理"])
 
@@ -286,7 +336,9 @@ with tab1:
                             confirm_sell = st.button("🔴 賣出", use_container_width=True)
 
                         if confirm_sell:
-                            raw_row = df[df["ID"].astype(str) == str(selected_id)].iloc[0]
+                            # 讀取最新 DB
+                            df_curr = load_data()
+                            raw_row = df_curr[df_curr["ID"].astype(str) == str(selected_id)].iloc[0]
                             
                             with st.spinner("處理中..."):
                                 d_rate = float(raw_row["手續費折數"]) / 10
@@ -301,8 +353,7 @@ with tab1:
                                 
                                 net_profit = sell_revenue - sell_fee - tax - (buy_cost_raw + buy_fee)
                                 
-                                df = load_data()
-                                idx_list = df.index[df['ID'].astype(str) == str(selected_id)].tolist()
+                                idx_list = df_curr.index[df_curr['ID'].astype(str) == str(selected_id)].tolist()
                                 
                                 if idx_list:
                                     original_idx = idx_list[0]
@@ -312,14 +363,14 @@ with tab1:
                                         original_buy_date = raw_row["日期"]
 
                                     if sell_qty == current_qty:
-                                        df.at[original_idx, "狀態"] = "已平倉"
-                                        df.at[original_idx, "賣出價"] = sell_price
-                                        df.at[original_idx, "損益"] = net_profit
-                                        df.at[original_idx, "日期"] = sell_date_str 
-                                        df.at[original_idx, "買入日期"] = original_buy_date
+                                        df_curr.at[original_idx, "狀態"] = "已平倉"
+                                        df_curr.at[original_idx, "賣出價"] = sell_price
+                                        df_curr.at[original_idx, "損益"] = net_profit
+                                        df_curr.at[original_idx, "日期"] = sell_date_str 
+                                        df_curr.at[original_idx, "買入日期"] = original_buy_date
                                     else:
                                         remain_qty = current_qty - sell_qty
-                                        df.at[original_idx, "股數"] = remain_qty
+                                        df_curr.at[original_idx, "股數"] = remain_qty
                                         
                                         new_closed_record = raw_row.copy()
                                         new_closed_record["ID"] = str(int(time.time() * 1000))
@@ -333,9 +384,9 @@ with tab1:
                                         if "止損價" in new_closed_record:
                                             del new_closed_record["止損價"]
                                         
-                                        df = pd.concat([pd.DataFrame([new_closed_record]), df], ignore_index=True)
+                                        df_curr = pd.concat([pd.DataFrame([new_closed_record]), df_curr], ignore_index=True)
 
-                                    save_data(df)
+                                    save_data(df_curr)
                                     st.success(f"平倉完成！損益: {net_profit}")
                                     time.sleep(1)
                                     st.rerun()
@@ -344,13 +395,37 @@ with tab1:
     else:
         st.info("載入中...")
 
-# === Tab 2: 歷史 ===
+# === Tab 2: 歷史 (V8.0 新增進階分析) ===
 with tab2:
     if not df.empty and "狀態" in df.columns:
         closed_positions = df[df["狀態"] == "已平倉"].copy()
         if not closed_positions.empty:
             closed_positions["損益"] = pd.to_numeric(closed_positions["損益"])
             
+            # --- V8.0 新增：戰績儀表板 ---
+            st.caption("📊 戰績健檢")
+            wins = closed_positions[closed_positions["損益"] > 0]
+            losses = closed_positions[closed_positions["損益"] <= 0]
+            
+            total_trades = len(closed_positions)
+            win_count = len(wins)
+            win_rate = (win_count / total_trades) * 100 if total_trades > 0 else 0
+            
+            total_profit = wins["損益"].sum()
+            total_loss = abs(losses["損益"].sum())
+            profit_factor = total_profit / total_loss if total_loss > 0 else float('inf')
+            avg_pl = closed_positions["損益"].mean()
+            
+            # 顯示指標 (2x2)
+            c1, c2 = st.columns(2)
+            c1.metric("勝率 (Win Rate)", f"{win_rate:.1f}%")
+            c1.metric("總獲利", f"${closed_positions['損益'].sum():,.0f}")
+            
+            c2.metric("賺賠比 (PF)", f"{profit_factor:.2f}", help="總獲利 / 總虧損，建議 > 2.0")
+            c2.metric("平均損益", f"${avg_pl:,.0f}")
+            st.markdown("---")
+            # ---------------------------
+
             def highlight_profit(val):
                 color = '#ff4b4b' if val > 0 else '#00c853'
                 return f'color: {color}; font-weight: bold;'
@@ -383,18 +458,16 @@ with tab2:
         else:
             st.info("尚無紀錄")
 
-# === Tab 3: 分析 (V7.1 完整圖表回歸) ===
+# === Tab 3: 分析 ===
 with tab3:
     if not df.empty and "狀態" in df.columns:
         closed_df = df[df["狀態"] == "已平倉"].copy()
         if not closed_df.empty:
             closed_df["損益"] = pd.to_numeric(closed_df["損益"])
             closed_df["日期"] = pd.to_datetime(closed_df["日期"])
-            # V7.1 補回買入日期轉換，以計算天數
             closed_df["買入日期"] = pd.to_datetime(closed_df["買入日期"])
             closed_df = closed_df.sort_values("日期")
             
-            # 1. 淨值走勢
             closed_df["累積損益"] = closed_df["損益"].cumsum()
             st.markdown("##### 💰 淨值走勢")
             fig_line = px.line(closed_df, x="日期", y="累積損益", markers=True)
@@ -404,7 +477,6 @@ with tab3:
             
             st.markdown("---")
 
-            # 2. 每週損益
             st.markdown("##### 📅 每週損益")
             closed_df["週次"] = closed_df["日期"].dt.strftime('%W')
             weekly_perf = closed_df.groupby("週次")["損益"].sum().reset_index()
@@ -416,7 +488,6 @@ with tab3:
             
             st.markdown("---")
 
-            # 3. 持倉天數 vs 損益 (V7.1 回歸!)
             st.markdown("##### ⏳ 持倉天數 vs 損益")
             closed_df["持倉天數"] = (closed_df["日期"] - closed_df["買入日期"]).dt.days
             
@@ -426,7 +497,6 @@ with tab3:
                                      hover_data=["代號", "買入日期", "心得"],
                                      color_continuous_scale=["#00c853", "#ff4b4b"])
             fig_scatter.add_hline(y=0, line_dash="dash", line_color="gray")
-            # 強制 X 軸從 0 開始，避免當沖單被切掉
             fig_scatter.update_layout(
                 xaxis=dict(tickmode='linear', tick0=0, dtick=1),
                 margin=dict(l=0, r=0, t=30, b=0)
