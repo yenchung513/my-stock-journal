@@ -10,10 +10,10 @@ import yfinance as yf
 
 # --- 頁面設定 (行動版優化: 預設收起側邊欄) ---
 st.set_page_config(
-    page_title="台股戰情室 V7.0 (行動版)", 
+    page_title="台股戰情室 V7.1 (行動版)", 
     page_icon="📱", 
     layout="wide",
-    initial_sidebar_state="collapsed" # 手機上預設收起側邊欄，增加可視空間
+    initial_sidebar_state="collapsed"
 )
 
 # --- Session State 初始化 ---
@@ -51,14 +51,13 @@ def get_google_sheet():
         st.error(f"連線失敗！錯誤訊息: {e}")
         st.stop()
 
-# --- 資料讀寫函式 (移除止損價欄位) ---
+# --- 資料讀寫函式 ---
 def load_data():
     sheet = get_google_sheet()
     try:
         data = sheet.get_all_records()
         df = pd.DataFrame(data)
         
-        # 定義標準欄位 (已移除 '止損價')
         columns = ["ID", "日期", "買入日期", "策略", "代號", "買入價", "股數", "狀態", "賣出價", "損益", "手續費折數", "心得"]
         
         if df.empty:
@@ -68,7 +67,6 @@ def load_data():
             if col not in df.columns:
                 df[col] = ""
         
-        # 只保留需要的欄位，過濾掉舊的止損價欄位
         df = df[columns]
 
         if "ID" in df.columns:
@@ -142,7 +140,7 @@ def get_realtime_prices(stock_codes):
             
     return prices, logs
 
-# --- 側邊欄：新增交易 (移除止損輸入) ---
+# --- 側邊欄：新增交易 ---
 st.sidebar.header("📝 新增交易")
 
 trade_date = st.sidebar.date_input("交易日期", datetime.now())
@@ -151,11 +149,10 @@ stock_id_input = st.sidebar.text_input("代號 (如: 2330)", "2330")
 stock_name_input = st.sidebar.text_input("名稱 (選填)", "台積電")
 stock_full_name = f"{stock_id_input} {stock_name_input}"
 buy_price = st.sidebar.number_input("買入價格", min_value=0.0, step=0.1, format="%.2f")
-# 止損輸入已移除
 volume = st.sidebar.number_input("股數", min_value=1, value=1000, step=1)
 discount = st.sidebar.number_input("手續費折數", value=2.8, step=0.1)
 
-if st.sidebar.button("➕ 建倉", use_container_width=True): # 讓按鈕在手機上滿版好按
+if st.sidebar.button("➕ 建倉", use_container_width=True):
     with st.spinner("寫入中..."):
         df = load_data()
         new_id = str(int(time.time() * 1000))
@@ -184,13 +181,13 @@ if st.sidebar.button("➕ 建倉", use_container_width=True): # 讓按鈕在手�
     st.rerun()
 
 # --- 主畫面 ---
-st.title("📱 台股戰情室 V7.0")
+st.title("📱 台股戰情室 V7.1")
 
 df = load_data()
 
 tab1, tab2, tab3, tab4 = st.tabs(["💼 持倉", "📜 歷史", "📊 分析", "🗑️ 管理"])
 
-# === Tab 1: 持倉 (行動版優化) ===
+# === Tab 1: 持倉 ===
 with tab1:
     if not df.empty and "狀態" in df.columns:
         open_positions = df[df["狀態"] == "持倉中"].copy()
@@ -199,8 +196,6 @@ with tab1:
             open_positions['code'] = open_positions['代號'].astype(str).str.extract(r'^(\d+)')
             unique_codes = open_positions['code'].dropna().unique().tolist()
             
-            # --- 更新按鈕區 ---
-            # 手機上讓更新按鈕明顯一點
             if st.button("🔄 更新即時股價", type="primary", use_container_width=True):
                 if unique_codes:
                     with st.spinner("連線中..."):
@@ -212,10 +207,8 @@ with tab1:
             if st.session_state.price_update_time:
                 st.caption(f"最後更新: {st.session_state.price_update_time}")
 
-            # --- 取用 Session State ---
             realtime_prices = st.session_state.realtime_prices
             
-            # 計算損益
             total_market_value = 0
             total_unrealized_net_profit = 0
             display_data = []
@@ -240,9 +233,6 @@ with tab1:
                 total_market_value += market_val
                 total_unrealized_net_profit += net_profit
                 
-                # 手機版：簡化顯示狀態
-                status_emoji = "🟢" if net_profit < 0 else "🔴" # 台股紅賺綠賠
-                
                 display_data.append({
                     "ID": row["ID"],
                     "代號": row["代號"],
@@ -250,23 +240,17 @@ with tab1:
                     "股數": int(qty),
                     "現價": current_price,
                     "損益": int(net_profit),
-                    "折數": row["手續費折數"], # 隱藏欄位用
-                    "買入日期": row["買入日期"] # 隱藏欄位用
+                    "折數": row["手續費折數"],
+                    "買入日期": row["買入日期"]
                 })
 
-            # 指標看板 (手機上 st.metric 會自動堆疊，看起來很OK)
             col_m1, col_m2 = st.columns(2)
             col_m1.metric("市值", f"${total_market_value:,.0f}")
-            col_m2.metric("淨損益", f"${total_unrealized_net_profit:,.0f}", delta_color="inverse") # inverse for TW stock color
+            col_m2.metric("淨損益", f"${total_unrealized_net_profit:,.0f}", delta_color="inverse")
 
             st.markdown("---")
-
-            # --- 持倉列表 (手機優化版) ---
-            # 使用 dataframe 顯示，但只選核心欄位以適應窄螢幕
             st.caption("📋 持倉明細")
             display_df = pd.DataFrame(display_data)
-            
-            # 手機上只顯示這四個最關鍵的，避免橫向卷軸
             mobile_cols = ["代號", "股數", "現價", "損益"]
             
             st.dataframe(
@@ -280,32 +264,28 @@ with tab1:
             
             st.markdown("---")
             
-            # --- 平倉操作區 (RWD 佈局優化) ---
             with st.expander("⚡ 執行平倉 (點擊展開)", expanded=True):
                 options = {f"{row['代號']} (${row['損益']})": row['ID'] for row in display_data}
                 selected_label = st.selectbox("選擇部位", list(options.keys()))
                 
                 if selected_label:
                     selected_id = options[selected_label]
-                    # 從 display_data 找回完整資料
                     target_data = next((item for item in display_data if str(item['ID']) == str(selected_id)), None)
                     
                     if target_data:
                         current_market_price = target_data['現價']
                         current_qty = target_data['股數']
                         
-                        # 手機版佈局：2x2 矩陣，比 1x4 更好按
                         c1, c2 = st.columns(2)
                         with c1:
                             sell_date_input = st.date_input("賣出日", datetime.now())
                             sell_qty = st.number_input("股數", min_value=1, max_value=current_qty, value=current_qty)
                         with c2:
                             sell_price = st.number_input("價格", min_value=0.0, step=0.1, value=float(current_market_price), format="%.2f")
-                            st.markdown("<br>", unsafe_allow_html=True) # 墊高按鈕對齊
+                            st.markdown("<br>", unsafe_allow_html=True) 
                             confirm_sell = st.button("🔴 賣出", use_container_width=True)
 
                         if confirm_sell:
-                            # 需重新讀取原始 df 取得完整資訊 (如買入日期、折數)
                             raw_row = df[df["ID"].astype(str) == str(selected_id)].iloc[0]
                             
                             with st.spinner("處理中..."):
@@ -321,7 +301,6 @@ with tab1:
                                 
                                 net_profit = sell_revenue - sell_fee - tax - (buy_cost_raw + buy_fee)
                                 
-                                # 更新資料庫
                                 df = load_data()
                                 idx_list = df.index[df['ID'].astype(str) == str(selected_id)].tolist()
                                 
@@ -351,7 +330,6 @@ with tab1:
                                         new_closed_record["日期"] = sell_date_str
                                         new_closed_record["買入日期"] = original_buy_date
                                         new_closed_record["心得"] = "" 
-                                        # 確保移除舊版欄位
                                         if "止損價" in new_closed_record:
                                             del new_closed_record["止損價"]
                                         
@@ -366,7 +344,7 @@ with tab1:
     else:
         st.info("載入中...")
 
-# === Tab 2: 歷史 (簡潔版) ===
+# === Tab 2: 歷史 ===
 with tab2:
     if not df.empty and "狀態" in df.columns:
         closed_positions = df[df["狀態"] == "已平倉"].copy()
@@ -377,7 +355,6 @@ with tab2:
                 color = '#ff4b4b' if val > 0 else '#00c853'
                 return f'color: {color}; font-weight: bold;'
 
-            # 手機版歷史只顯示重點
             display_cols = ["日期", "代號", "損益", "心得"]
             show_df = closed_positions[display_cols].rename(columns={"日期": "賣出日"})
             
@@ -406,22 +383,28 @@ with tab2:
         else:
             st.info("尚無紀錄")
 
-# === Tab 3: 圖表 (維持不變，Plotly 本身有RWD) ===
+# === Tab 3: 分析 (V7.1 完整圖表回歸) ===
 with tab3:
     if not df.empty and "狀態" in df.columns:
         closed_df = df[df["狀態"] == "已平倉"].copy()
         if not closed_df.empty:
             closed_df["損益"] = pd.to_numeric(closed_df["損益"])
             closed_df["日期"] = pd.to_datetime(closed_df["日期"])
+            # V7.1 補回買入日期轉換，以計算天數
+            closed_df["買入日期"] = pd.to_datetime(closed_df["買入日期"])
             closed_df = closed_df.sort_values("日期")
             
+            # 1. 淨值走勢
             closed_df["累積損益"] = closed_df["損益"].cumsum()
             st.markdown("##### 💰 淨值走勢")
             fig_line = px.line(closed_df, x="日期", y="累積損益", markers=True)
             fig_line.update_traces(line_color='#2980b9', line_width=3)
-            fig_line.update_layout(margin=dict(l=0, r=0, t=30, b=0)) # 減少邊距適合手機
+            fig_line.update_layout(margin=dict(l=0, r=0, t=30, b=0))
             st.plotly_chart(fig_line, use_container_width=True)
             
+            st.markdown("---")
+
+            # 2. 每週損益
             st.markdown("##### 📅 每週損益")
             closed_df["週次"] = closed_df["日期"].dt.strftime('%W')
             weekly_perf = closed_df.groupby("週次")["損益"].sum().reset_index()
@@ -430,6 +413,26 @@ with tab3:
                                 color_continuous_scale=["#00c853", "#ff4b4b"])
             fig_bar.update_layout(margin=dict(l=0, r=0, t=30, b=0))
             st.plotly_chart(fig_bar, use_container_width=True)
+            
+            st.markdown("---")
+
+            # 3. 持倉天數 vs 損益 (V7.1 回歸!)
+            st.markdown("##### ⏳ 持倉天數 vs 損益")
+            closed_df["持倉天數"] = (closed_df["日期"] - closed_df["買入日期"]).dt.days
+            
+            fig_scatter = px.scatter(closed_df, x="持倉天數", y="損益",
+                                     color="損益",
+                                     size=closed_df["損益"].abs(),
+                                     hover_data=["代號", "買入日期", "心得"],
+                                     color_continuous_scale=["#00c853", "#ff4b4b"])
+            fig_scatter.add_hline(y=0, line_dash="dash", line_color="gray")
+            # 強制 X 軸從 0 開始，避免當沖單被切掉
+            fig_scatter.update_layout(
+                xaxis=dict(tickmode='linear', tick0=0, dtick=1),
+                margin=dict(l=0, r=0, t=30, b=0)
+            )
+            st.plotly_chart(fig_scatter, use_container_width=True)
+
         else:
             st.info("累積紀錄後顯示圖表")
     else:
@@ -439,7 +442,7 @@ with tab3:
 with tab4:
     if not df.empty and "ID" in df.columns:
         st.caption("完整資料庫預覽")
-        st.dataframe(df, use_container_width=True) # 手機上這裡會有卷軸是正常的
+        st.dataframe(df, use_container_width=True)
         
         st.subheader("🗑️ 刪除紀錄")
         delete_options = {f"{row['日期']} {row['代號']}": row['ID'] for index, row in df.iterrows()}
