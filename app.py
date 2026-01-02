@@ -10,7 +10,7 @@ import yfinance as yf
 
 # --- 頁面設定 ---
 st.set_page_config(
-    page_title="台股戰情室 V8.4", 
+    page_title="台股戰情室 V8.5", 
     page_icon="📱", 
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -227,11 +227,11 @@ else:
 
 
 # --- 主畫面 ---
-st.title("📱 台股戰情室 V8.4")
+st.title("📱 台股戰情室 V8.5")
 
 tab1, tab2, tab3, tab4 = st.tabs(["💼 持倉", "📜 歷史", "📊 分析", "🗑️ 管理"])
 
-# === Tab 1: 持倉 (新增報酬率%) ===
+# === Tab 1: 持倉 (修正報酬率計算) ===
 with tab1:
     if not df.empty and "狀態" in df.columns:
         open_positions = df[df["狀態"] == "持倉中"].copy()
@@ -274,9 +274,9 @@ with tab1:
                 
                 net_profit = (market_val - sell_fee - tax) - (cost_val + buy_fee)
                 
-                # --- V8.4 新增：報酬率計算 ---
+                # --- V8.5 修正：乘以 100 轉為百分比數值 ---
                 total_cost = cost_val + buy_fee
-                roi = (net_profit / total_cost) if total_cost > 0 else 0
+                roi = (net_profit / total_cost) * 100 if total_cost > 0 else 0
                 
                 total_market_value += market_val
                 total_unrealized_net_profit += net_profit
@@ -288,7 +288,7 @@ with tab1:
                     "股數": int(qty),
                     "現價": current_price,
                     "損益": int(net_profit),
-                    "報酬率": roi, # 新增欄位
+                    "報酬率": roi,
                     "折數": row["手續費折數"],
                     "買入日期": row["買入日期"]
                 })
@@ -301,7 +301,6 @@ with tab1:
             st.caption("📋 持倉明細")
             display_df = pd.DataFrame(display_data)
             
-            # V8.4 修改：加入 '報酬率' 欄位
             mobile_cols = ["代號", "買入日期", "現價", "損益", "報酬率"]
             
             st.dataframe(
@@ -309,7 +308,7 @@ with tab1:
                     "買入價": "{:.2f}",
                     "現價": "{:.2f}",
                     "損益": "{:+d}",
-                    "報酬率": "{:+.2%}", # 格式化為百分比
+                    "報酬率": "{:+.2f}%", # 這裡不用 % 格式化，因為數值已經 *100
                 }),
                 column_config={
                     "報酬率": st.column_config.NumberColumn(format="%.2f%%")
@@ -400,15 +399,14 @@ with tab1:
     else:
         st.info("載入中...")
 
-# === Tab 2: 歷史 (新增報酬率%) ===
+# === Tab 2: 歷史 (修正報酬率計算) ===
 with tab2:
     if not df.empty and "狀態" in df.columns:
         closed_positions = df[df["狀態"] == "已平倉"].copy()
         if not closed_positions.empty:
             closed_positions["損益"] = pd.to_numeric(closed_positions["損益"])
             
-            # --- V8.4 新增：計算歷史報酬率 ---
-            # 因為沒有直接存 ROI，需要即時推算 (精確度取決於當時費率)
+            # --- V8.5 修正：乘以 100 ---
             def calc_historical_roi(row):
                 try:
                     buy_p = float(row["買入價"])
@@ -421,7 +419,7 @@ with tab2:
                     total_cost = cost_val + buy_fee
                     
                     if total_cost > 0:
-                        return profit / total_cost
+                        return (profit / total_cost) * 100 # 這裡乘以 100
                     return 0.0
                 except:
                     return 0.0
@@ -452,7 +450,6 @@ with tab2:
                 color = '#ff4b4b' if val > 0 else '#00c853'
                 return f'color: {color}; font-weight: bold;'
 
-            # V8.4 修改：加入 '報酬率' 欄位
             display_cols = ["買入日期", "日期", "代號", "買入價", "賣出價", "損益", "報酬率", "心得"]
             show_df = closed_positions[display_cols].rename(columns={"日期": "賣出日"})
             
@@ -462,7 +459,7 @@ with tab2:
                     "買入價": st.column_config.NumberColumn(format="%.2f"),
                     "賣出價": st.column_config.NumberColumn(format="%.2f"),
                     "損益": st.column_config.NumberColumn(format="%d"),
-                    "報酬率": st.column_config.NumberColumn(format="%.2f%%"), # 格式化為百分比
+                    "報酬率": st.column_config.NumberColumn(format="%.2f%%"),
                 },
                 use_container_width=True, 
                 hide_index=True
