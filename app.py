@@ -10,7 +10,7 @@ import yfinance as yf
 
 # --- 頁面設定 ---
 st.set_page_config(
-    page_title="台股戰情室 V8.2", 
+    page_title="台股戰情室 V8.3", 
     page_icon="📱", 
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -227,7 +227,7 @@ else:
 
 
 # --- 主畫面 ---
-st.title("📱 台股戰情室 V8.2")
+st.title("📱 台股戰情室 V8.3")
 
 tab1, tab2, tab3, tab4 = st.tabs(["💼 持倉", "📜 歷史", "📊 分析", "🗑️ 管理"])
 
@@ -390,7 +390,7 @@ with tab1:
     else:
         st.info("載入中...")
 
-# === Tab 2: 歷史 (V8.2 新增買賣價 + 格式化) ===
+# === Tab 2: 歷史 ===
 with tab2:
     if not df.empty and "狀態" in df.columns:
         closed_positions = df[df["狀態"] == "已平倉"].copy()
@@ -421,11 +421,9 @@ with tab2:
                 color = '#ff4b4b' if val > 0 else '#00c853'
                 return f'color: {color}; font-weight: bold;'
 
-            # V8.2 新增：買入價、賣出價
             display_cols = ["買入日期", "日期", "代號", "買入價", "賣出價", "損益", "心得"]
             show_df = closed_positions[display_cols].rename(columns={"日期": "賣出日"})
             
-            # V8.2 新增：強制格式化小數點 (column_config)
             st.dataframe(
                 show_df.style.applymap(highlight_profit, subset=['損益']),
                 column_config={
@@ -479,9 +477,15 @@ with tab3:
             
             st.markdown("---")
 
+            # --- V8.3 修正：加入年份，解決跨年排序問題 ---
             st.markdown("##### 📅 每週損益")
-            closed_df["週次"] = closed_df["日期"].dt.strftime('%W')
+            # 舊版: .dt.strftime('%W') -> 01, 52 (跨年會錯亂)
+            # 新版: .dt.strftime('%Y-W%W') -> 2025-W52, 2026-W01 (正確排序)
+            closed_df["週次"] = closed_df["日期"].dt.strftime('%Y-W%W')
             weekly_perf = closed_df.groupby("週次")["損益"].sum().reset_index()
+            # 確保按週次排序 (GroupBy 預設會排，但顯式排序更保險)
+            weekly_perf = weekly_perf.sort_values("週次")
+            
             fig_bar = px.bar(weekly_perf, x="週次", y="損益",
                                 color="損益",
                                 color_continuous_scale=["#00c853", "#ff4b4b"])
