@@ -10,7 +10,7 @@ import yfinance as yf
 
 # --- 頁面設定 ---
 st.set_page_config(
-    page_title="台股戰情室 V8.5", 
+    page_title="台股戰情室 V8.6", 
     page_icon="📱", 
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -227,11 +227,11 @@ else:
 
 
 # --- 主畫面 ---
-st.title("📱 台股戰情室 V8.5")
+st.title("📱 台股戰情室 V8.6")
 
 tab1, tab2, tab3, tab4 = st.tabs(["💼 持倉", "📜 歷史", "📊 分析", "🗑️ 管理"])
 
-# === Tab 1: 持倉 (修正報酬率計算) ===
+# === Tab 1: 持倉 (補回股數) ===
 with tab1:
     if not df.empty and "狀態" in df.columns:
         open_positions = df[df["狀態"] == "持倉中"].copy()
@@ -274,7 +274,6 @@ with tab1:
                 
                 net_profit = (market_val - sell_fee - tax) - (cost_val + buy_fee)
                 
-                # --- V8.5 修正：乘以 100 轉為百分比數值 ---
                 total_cost = cost_val + buy_fee
                 roi = (net_profit / total_cost) * 100 if total_cost > 0 else 0
                 
@@ -301,14 +300,15 @@ with tab1:
             st.caption("📋 持倉明細")
             display_df = pd.DataFrame(display_data)
             
-            mobile_cols = ["代號", "買入日期", "現價", "損益", "報酬率"]
+            # V8.6 修改：加入 '股數'
+            mobile_cols = ["代號", "買入日期", "股數", "現價", "損益", "報酬率"]
             
             st.dataframe(
                 display_df[mobile_cols].style.format({
                     "買入價": "{:.2f}",
                     "現價": "{:.2f}",
                     "損益": "{:+d}",
-                    "報酬率": "{:+.2f}%", # 這裡不用 % 格式化，因為數值已經 *100
+                    "報酬率": "{:+.2f}%", 
                 }),
                 column_config={
                     "報酬率": st.column_config.NumberColumn(format="%.2f%%")
@@ -399,14 +399,13 @@ with tab1:
     else:
         st.info("載入中...")
 
-# === Tab 2: 歷史 (修正報酬率計算) ===
+# === Tab 2: 歷史 (補回股數) ===
 with tab2:
     if not df.empty and "狀態" in df.columns:
         closed_positions = df[df["狀態"] == "已平倉"].copy()
         if not closed_positions.empty:
             closed_positions["損益"] = pd.to_numeric(closed_positions["損益"])
             
-            # --- V8.5 修正：乘以 100 ---
             def calc_historical_roi(row):
                 try:
                     buy_p = float(row["買入價"])
@@ -419,7 +418,7 @@ with tab2:
                     total_cost = cost_val + buy_fee
                     
                     if total_cost > 0:
-                        return (profit / total_cost) * 100 # 這裡乘以 100
+                        return (profit / total_cost) * 100 
                     return 0.0
                 except:
                     return 0.0
@@ -450,7 +449,8 @@ with tab2:
                 color = '#ff4b4b' if val > 0 else '#00c853'
                 return f'color: {color}; font-weight: bold;'
 
-            display_cols = ["買入日期", "日期", "代號", "買入價", "賣出價", "損益", "報酬率", "心得"]
+            # V8.6 修改：加入 '股數'
+            display_cols = ["買入日期", "日期", "代號", "買入價", "股數", "賣出價", "損益", "報酬率", "心得"]
             show_df = closed_positions[display_cols].rename(columns={"日期": "賣出日"})
             
             st.dataframe(
