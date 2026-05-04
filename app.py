@@ -454,7 +454,7 @@ with tab2:
             show_df = closed_positions[display_cols].rename(columns={"日期": "賣出日"})
             
             st.dataframe(
-                show_df.style.applymap(highlight_profit, subset=['損益']),
+                show_df.style.map(highlight_profit, subset=['損益']),
                 column_config={
                     "買入價": st.column_config.NumberColumn(format="%.2f"),
                     "賣出價": st.column_config.NumberColumn(format="%.2f"),
